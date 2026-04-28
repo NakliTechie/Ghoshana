@@ -2447,8 +2447,14 @@
       // OS voice.name often embeds language description in parens
       // (e.g. "Daniel (English (United Kingdom))"). Strip everything from
       // the first " (" — the BCP-47 tag is shown alongside, redundantly.
-      const n = voice?.name || '';
-      return n.replace(/\s*\([^)]*\).*$/, '').trim() || n;
+      // Also strip provider prefixes (Google/Microsoft/Apple/Chrome OS) and
+      // truncate the residual to ~22 chars so the rail dropdown doesn't
+      // overflow on names like "Google UK English Female".
+      let n = voice?.name || '';
+      n = n.replace(/\s*\([^)]*\).*$/, '').trim();
+      n = n.replace(/^(Google|Microsoft|Apple|Chrome OS)\s+/i, '').trim();
+      if (n.length > 22) n = n.slice(0, 21) + '…';
+      return n || (voice?.name || '');
     }
 
     function defaultLangTag(langCode) {
