@@ -2443,6 +2443,14 @@
       return _voices.find(v => v.name === name) || null;
     }
 
+    function shortName(voice) {
+      // OS voice.name often embeds language description in parens
+      // (e.g. "Daniel (English (United Kingdom))"). Strip everything from
+      // the first " (" — the BCP-47 tag is shown alongside, redundantly.
+      const n = voice?.name || '';
+      return n.replace(/\s*\([^)]*\).*$/, '').trim() || n;
+    }
+
     function defaultLangTag(langCode) {
       // Pick the first available voice's tag for the lang, else fall back to
       // the bare prefix.
@@ -2487,7 +2495,7 @@
 
     function isSupported() { return _supported; }
 
-    return { ensureVoices, listForLang, findVoiceByName, defaultLangTag, speak, stop, isSupported, onActiveChange, PACE_RATES };
+    return { ensureVoices, listForLang, findVoiceByName, shortName, defaultLangTag, speak, stop, isSupported, onActiveChange, PACE_RATES };
   })();
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -3468,17 +3476,29 @@
       speakBtn.className = 'lang-cell-btn';
       speakBtn.dataset.role = 'speak';
       speakBtn.innerHTML = '▶ Speak';
+      speakBtn.title = 'Play current take (or generate one if none exists)';
       speakBtn.onclick = (e) => {
         e.stopPropagation();
         onSpeakClicked(cell, proj, seg, lang);
       };
       actions.appendChild(speakBtn);
 
+      const regenBtn = document.createElement('button');
+      regenBtn.className = 'lang-cell-btn';
+      regenBtn.dataset.role = 'regen';
+      regenBtn.innerHTML = '⟳';
+      regenBtn.title = 'Regenerate with current voice + pace (creates a new take)';
+      regenBtn.onclick = (e) => {
+        e.stopPropagation();
+        onRegenClicked(cell, proj, seg, lang);
+      };
+      actions.appendChild(regenBtn);
+
       const takesBtn = document.createElement('button');
       takesBtn.className = 'lang-cell-btn';
       takesBtn.dataset.role = 'takes';
-      takesBtn.innerHTML = '⟳';
-      takesBtn.title = 'Recording takes';
+      takesBtn.innerHTML = '⋯';
+      takesBtn.title = 'Take history';
       takesBtn.onclick = (e) => {
         e.stopPropagation();
         onTakesClicked(cell, proj, seg, lang, takesBtn);
@@ -3544,7 +3564,7 @@
         for (const v of list) {
           const opt = document.createElement('option');
           opt.value = v.name;
-          opt.textContent = `${v.name} · ${v.lang}`;
+          opt.textContent = `${__m_audio_speech.shortName(v)} · ${v.lang}`;
           voiceSel.appendChild(opt);
         }
         voiceSel.value = seg.voices?.[lang] || '';
@@ -3584,20 +3604,43 @@
 
     async function onSpeakClicked(cell, proj, seg, lang) {
       await __m_audio_speech.ensureVoices();
+      if (!__m_audio_speech.isSupported()) {
+        __m_ui_toast.show('Web Speech API unavailable in this browser.', 'err');
+        return;
+      }
+      // Replay the current take if one exists (uses recorded voice + pace,
+      // so changing the project voice doesn't surprise-mutate playback). If
+      // no take exists yet, fall through to regenerate.
+      const r = __m_data_project.CANONICAL_ROTATION;
+      const currentId = seg.current_takes?.[lang]?.[r];
+      const list = seg.takes?.[lang]?.[r] || [];
+      const take = currentId ? list.find(t => t.id === currentId) : null;
+      if (take) {
+        __m_audio_speech.speak(take.source_text, {
+          voiceName: take.voice, pace: take.pace, langCode: lang,
+          key: `${seg.id}::${lang}`,
+          onError: (e) => __m_ui_toast.show(`Speech failed: ${e.error || e.message || 'unknown'}`, 'err'),
+        });
+        return;
+      }
+      onRegenClicked(cell, proj, seg, lang);
+    }
+
+    async function onRegenClicked(cell, proj, seg, lang) {
+      await __m_audio_speech.ensureVoices();
+      if (!__m_audio_speech.isSupported()) {
+        __m_ui_toast.show('Web Speech API unavailable in this browser.', 'err');
+        return;
+      }
       const text = _cellTextForSpeak(proj, seg, lang);
       if (!text) {
         __m_ui_toast.show('Nothing to speak yet — type some text first.', 'warn');
         return;
       }
-      if (!__m_audio_speech.isSupported()) {
-        __m_ui_toast.show('Web Speech API unavailable in this browser.', 'err');
-        return;
-      }
       const voiceName = resolveVoice(proj, seg, lang);
       const pace = resolvePace(proj, seg, lang);
       const key = `${seg.id}::${lang}`;
-      // Record a take metadata entry on speak (lightweight — not a real audio
-      // file in the Web Speech tier; full audio comes in Layer 4 with Parler-TTS).
+      // Record a new take with the CURRENT voice + pace settings, then play.
       _recordTake(proj, seg, lang, { voiceName, pace, sourceText: text });
       __m_audio_speech.speak(text, {
         voiceName, pace, langCode: lang, key,
@@ -4072,7 +4115,7 @@
           <div style="display:flex;gap:6px">
             <select data-vlang="${lang}" data-role="voice" style="flex:1;padding:5px 6px;border:1px solid var(--border-2);border-radius:4px;font-size:12px;background:var(--panel);color:var(--ink)">
               <option value="">(device default)</option>
-              ${voices.map(v => `<option value="${__m_core_html.esc(v.name)}">${__m_core_html.esc(v.name)} · ${__m_core_html.esc(v.lang)}</option>`).join('')}
+              ${voices.map(v => `<option value="${__m_core_html.esc(v.name)}">${__m_core_html.esc(__m_audio_speech.shortName(v))} · ${__m_core_html.esc(v.lang)}</option>`).join('')}
             </select>
             <select data-vlang="${lang}" data-role="pace" style="width:110px;padding:5px 6px;border:1px solid var(--border-2);border-radius:4px;font-size:12px;background:var(--panel);color:var(--ink)">
               <option value="">(default)</option>
@@ -4091,15 +4134,19 @@
           proj.voices = proj.voices || {};
           if (voiceSel.value) proj.voices[lang] = voiceSel.value;
           else delete proj.voices[lang];
-          try { await __m_storage_projects.save(proj); }
-          catch (e) { __m_ui_toast.show(e.message, 'err'); }
+          try {
+            await __m_storage_projects.save(proj);
+            __m_ui_toast.show(`Voice updated for ${meta.name}. Click ⟳ on a cell to regenerate.`, 'ok', 3200);
+          } catch (e) { __m_ui_toast.show(e.message, 'err'); }
         };
         paceSel.onchange = async () => {
           proj.paces = proj.paces || {};
           if (paceSel.value) proj.paces[lang] = paceSel.value;
           else delete proj.paces[lang];
-          try { await __m_storage_projects.save(proj); }
-          catch (e) { __m_ui_toast.show(e.message, 'err'); }
+          try {
+            await __m_storage_projects.save(proj);
+            __m_ui_toast.show(`Pace updated for ${meta.name}. Click ⟳ on a cell to regenerate.`, 'ok', 3200);
+          } catch (e) { __m_ui_toast.show(e.message, 'err'); }
         };
       }
     }
