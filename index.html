@@ -2370,7 +2370,169 @@
   })();
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // AUDIO — Web Speech API wrapper (Layer 2 default; Indic Parler-TTS in Layer 4)
+  // TTS — MMS-TTS via transformers.js (on-device, no OS voice dependency)
+  //
+  // Per-language VITS model from facebook/mms-tts-* (Xenova ONNX exports).
+  // ~50-150 MB per language, downloaded + cached by transformers.js on first
+  // synthesize. Shipping this instead of Web Speech because Web Speech falls
+  // back to garbled English-phoneme rendering when the OS doesn't have a
+  // native voice for the target Indic lang. Indic Parler-TTS (Layer 4 plan)
+  // is higher quality but a 4-8 week project; MMS gives full Indic coverage
+  // today with a same-day swap.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const __m_tts_mms = (() => {
+    // ISO-639-1 → Xenova MMS-TTS model id. Most Indic langs have coverage;
+    // a handful of smaller scheduled langs may 404 — caller should check
+    // isLangSupported() before queuing.
+    const MMS_MODEL = {
+      en:  'Xenova/mms-tts-eng',
+      hi:  'Xenova/mms-tts-hin',
+      ta:  'Xenova/mms-tts-tam',
+      te:  'Xenova/mms-tts-tel',
+      bn:  'Xenova/mms-tts-ben',
+      mr:  'Xenova/mms-tts-mar',
+      kn:  'Xenova/mms-tts-kan',
+      gu:  'Xenova/mms-tts-guj',
+      ml:  'Xenova/mms-tts-mal',
+      pa:  'Xenova/mms-tts-pan',
+      or:  'Xenova/mms-tts-ory',
+      as:  'Xenova/mms-tts-asm',
+      ur:  'Xenova/mms-tts-urd-script_arabic',
+      ne:  'Xenova/mms-tts-npi',
+      sa:  'Xenova/mms-tts-san',
+      mai: 'Xenova/mms-tts-mai',
+      sd:  'Xenova/mms-tts-snd',
+      kok: 'Xenova/mms-tts-kok',
+      mni: 'Xenova/mms-tts-mni',
+      sat: 'Xenova/mms-tts-sat',
+      // ks (Kashmiri), brx (Bodo), doi (Dogri) — not in MMS coverage; warn in UI.
+    };
+
+    let _TJS = null;
+    let _TJSPromise = null;
+    const _pipelines = new Map(); // langCode → tts pipeline
+    const _loading   = new Map(); // langCode → Promise
+    let _audioCtx = null;
+    let _activeSource = null;
+    let _onActiveChange = null;
+    let _onProgress = null;
+
+    async function _ensureTJS() {
+      if (_TJS) return _TJS;
+      if (_TJSPromise) return _TJSPromise;
+      _TJSPromise = (async () => {
+        const mod = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@4/+esm');
+        // Browser-safe defaults — Cache Storage caching is on by default.
+        if (mod.env) {
+          mod.env.allowLocalModels = false;
+          mod.env.allowRemoteModels = true;
+        }
+        _TJS = mod;
+        return mod;
+      })();
+      return _TJSPromise;
+    }
+
+    function isLangSupported(langCode) { return !!MMS_MODEL[langCode]; }
+    function modelFor(langCode) { return MMS_MODEL[langCode] || null; }
+
+    async function ensureLoaded(langCode, onProgress) {
+      if (_pipelines.has(langCode)) return _pipelines.get(langCode);
+      if (_loading.has(langCode))   return _loading.get(langCode);
+      const modelId = MMS_MODEL[langCode];
+      if (!modelId) {
+        const meta = (typeof __m_data_lang !== 'undefined') ? __m_data_lang.LANGUAGES?.[langCode] : null;
+        throw new Error(`No MMS-TTS model for ${meta?.name || langCode}. (Coverage: 19 of 22 Indic langs; brx/doi/ks need a different TTS engine.)`);
+      }
+      const promise = (async () => {
+        const TJS = await _ensureTJS();
+        const pipe = await TJS.pipeline('text-to-speech', modelId, {
+          dtype: 'fp32',
+          progress_callback: (p) => {
+            if (onProgress) onProgress({ ...p, langCode, modelId });
+            if (_onProgress) _onProgress({ ...p, langCode, modelId });
+          },
+        });
+        _pipelines.set(langCode, pipe);
+        _loading.delete(langCode);
+        return pipe;
+      })();
+      _loading.set(langCode, promise);
+      return promise;
+    }
+
+    function _audioContext() {
+      if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      // Some browsers start the AudioContext in 'suspended' state until a
+      // user gesture; resume defensively.
+      if (_audioCtx.state === 'suspended') _audioCtx.resume();
+      return _audioCtx;
+    }
+
+    function _emitActive(active, key) { if (_onActiveChange) _onActiveChange({ active, key }); }
+
+    function onActiveChange(fn) { _onActiveChange = fn; }
+    function onProgress(fn) { _onProgress = fn; }
+
+    function stop() {
+      if (_activeSource) {
+        try { _activeSource.stop(); } catch {}
+        _activeSource = null;
+      }
+      _emitActive(false, null);
+    }
+
+    async function speak(text, { langCode, paceRate = 1.0, key, onEnd, onError } = {}) {
+      if (!text) return null;
+      try {
+        stop();
+        const pipe = await ensureLoaded(langCode);
+        const out = await pipe(text);
+        // out: { audio: Float32Array, sampling_rate: number }
+        if (!out || !out.audio) throw new Error('Synthesizer returned no audio.');
+        const ctx = _audioContext();
+        const buf = ctx.createBuffer(1, out.audio.length, out.sampling_rate);
+        buf.getChannelData(0).set(out.audio);
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.playbackRate.value = paceRate;
+        src.connect(ctx.destination);
+        src.onended = () => {
+          if (_activeSource === src) _activeSource = null;
+          _emitActive(false, key);
+          if (onEnd) onEnd();
+        };
+        _activeSource = src;
+        _emitActive(true, key);
+        src.start();
+        return src;
+      } catch (e) {
+        _emitActive(false, key);
+        if (onError) onError(e);
+        else console.error('[mms speak]', e);
+        return null;
+      }
+    }
+
+    function isSupported() {
+      return typeof window !== 'undefined'
+          && (typeof window.AudioContext === 'function' || typeof window.webkitAudioContext === 'function');
+    }
+
+    const PACE_RATES = {
+      very_slow: 0.5, slow: 0.75, moderate: 1.0, fast: 1.25, very_fast: 1.5,
+    };
+
+    return {
+      ensureLoaded, speak, stop, onActiveChange, onProgress,
+      isLangSupported, modelFor, isSupported, PACE_RATES,
+      MMS_MODEL,
+    };
+  })();
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // AUDIO — legacy Web Speech wrapper (kept for reference; not wired in v2.0)
   // ═══════════════════════════════════════════════════════════════════════════
 
   const __m_audio_speech = (() => {
@@ -3589,42 +3751,17 @@
       const row = document.createElement('div');
       row.dataset.role = 'override-row';
       row.style.cssText = 'display:none;margin-top:6px;padding-top:6px;border-top:1px dashed var(--border)';
-      const projVoice = proj.voices?.[lang] || '(device default)';
       const projPace  = proj.paces?.[lang]  || proj.default_pace || 'moderate';
       const paceList = ['very_slow','slow','moderate','fast','very_fast'];
       row.innerHTML = `
-        <div style="font-size:10px;color:var(--muted);margin-bottom:4px">Per-option override (leave blank to inherit)</div>
-        <div style="display:flex;gap:4px">
-          <select data-role="ovr-voice" style="flex:1;padding:4px 6px;border:1px solid var(--border-2);border-radius:4px;font-size:11px;background:var(--panel);color:var(--ink)">
-            <option value="">(default · ${__m_core_html.esc(projVoice)})</option>
-          </select>
-          <select data-role="ovr-pace" style="width:100px;padding:4px 6px;border:1px solid var(--border-2);border-radius:4px;font-size:11px;background:var(--panel);color:var(--ink)">
-            <option value="">(default · ${__m_core_html.esc(projPace.replace('_',' '))})</option>
-            ${paceList.map(p => `<option value="${p}">${p.replace('_',' ')}</option>`).join('')}
-          </select>
-        </div>
+        <div style="font-size:10px;color:var(--muted);margin-bottom:4px">Per-option pace override (leave blank to inherit)</div>
+        <select data-role="ovr-pace" style="width:100%;padding:4px 6px;border:1px solid var(--border-2);border-radius:4px;font-size:11px;background:var(--panel);color:var(--ink)">
+          <option value="">(default · ${__m_core_html.esc(projPace.replace('_',' '))})</option>
+          ${paceList.map(p => `<option value="${p}">${p.replace('_',' ')}</option>`).join('')}
+        </select>
       `;
-      const voiceSel = row.querySelector('[data-role="ovr-voice"]');
-      const paceSel  = row.querySelector('[data-role="ovr-pace"]');
-      // Populate voices async — voices may not be loaded yet.
-      __m_audio_speech.ensureVoices().then(() => {
-        const list = __m_audio_speech.listForLang(lang);
-        for (const v of list) {
-          const opt = document.createElement('option');
-          opt.value = v.name;
-          opt.textContent = `${__m_audio_speech.shortName(v)} · ${v.lang}`;
-          voiceSel.appendChild(opt);
-        }
-        voiceSel.value = seg.voices?.[lang] || '';
-      });
+      const paceSel = row.querySelector('[data-role="ovr-pace"]');
       paceSel.value = seg.paces?.[lang] || '';
-      voiceSel.onchange = async () => {
-        seg.voices = seg.voices || {};
-        if (voiceSel.value) seg.voices[lang] = voiceSel.value;
-        else delete seg.voices[lang];
-        try { await __m_storage_projects.save(proj); }
-        catch (e) { __m_ui_toast.show(e.message, 'err'); }
-      };
       paceSel.onchange = async () => {
         seg.paces = seg.paces || {};
         if (paceSel.value) seg.paces[lang] = paceSel.value;
@@ -3635,10 +3772,6 @@
       return row;
     }
 
-    function resolveVoice(proj, seg, lang) {
-      // Per-segment override > project-level > Web Speech default for lang.
-      return (seg.voices?.[lang]) || (proj.voices?.[lang]) || null;
-    }
     function resolvePace(proj, seg, lang) {
       return (seg.paces?.[lang]) || (proj.paces?.[lang]) || (proj.default_pace || 'moderate');
     }
@@ -3651,23 +3784,25 @@
     }
 
     async function onSpeakClicked(cell, proj, seg, lang) {
-      await __m_audio_speech.ensureVoices();
-      if (!__m_audio_speech.isSupported()) {
-        __m_ui_toast.show('Web Speech API unavailable in this browser.', 'err');
+      if (!__m_tts_mms.isSupported()) {
+        __m_ui_toast.show('Audio playback unavailable in this browser.', 'err');
         return;
       }
-      // Replay the current take if one exists (uses recorded voice + pace,
-      // so changing the project voice doesn't surprise-mutate playback). If
-      // no take exists yet, fall through to regenerate.
+      if (!__m_tts_mms.isLangSupported(lang)) {
+        const meta = __m_data_lang.LANGUAGES[lang];
+        __m_ui_toast.show(`No on-device TTS model for ${meta?.name || lang}.`, 'err');
+        return;
+      }
+      // Replay the current take with its frozen pace; if no take exists, regen.
       const r = __m_data_project.CANONICAL_ROTATION;
       const currentId = seg.current_takes?.[lang]?.[r];
       const list = seg.takes?.[lang]?.[r] || [];
       const take = currentId ? list.find(t => t.id === currentId) : null;
       if (take) {
-        __m_audio_speech.speak(take.source_text, {
-          voiceName: take.voice, pace: take.pace, langCode: lang,
-          key: `${seg.id}::${lang}`,
-          onError: (e) => __m_ui_toast.show(`Speech failed: ${e.error || e.message || 'unknown'}`, 'err'),
+        const paceRate = __m_tts_mms.PACE_RATES[take.pace] ?? 1.0;
+        __m_tts_mms.speak(take.source_text, {
+          langCode: lang, paceRate, key: `${seg.id}::${lang}`,
+          onError: (e) => __m_ui_toast.show(`Speech failed: ${e.message || 'unknown'}`, 'err'),
         });
         return;
       }
@@ -3675,9 +3810,13 @@
     }
 
     async function onRegenClicked(cell, proj, seg, lang) {
-      await __m_audio_speech.ensureVoices();
-      if (!__m_audio_speech.isSupported()) {
-        __m_ui_toast.show('Web Speech API unavailable in this browser.', 'err');
+      if (!__m_tts_mms.isSupported()) {
+        __m_ui_toast.show('Audio playback unavailable in this browser.', 'err');
+        return;
+      }
+      if (!__m_tts_mms.isLangSupported(lang)) {
+        const meta = __m_data_lang.LANGUAGES[lang];
+        __m_ui_toast.show(`No on-device TTS model for ${meta?.name || lang}.`, 'err');
         return;
       }
       const text = _cellTextForSpeak(proj, seg, lang);
@@ -3685,14 +3824,13 @@
         __m_ui_toast.show('Nothing to speak yet — type some text first.', 'warn');
         return;
       }
-      const voiceName = resolveVoice(proj, seg, lang);
       const pace = resolvePace(proj, seg, lang);
+      const paceRate = __m_tts_mms.PACE_RATES[pace] ?? 1.0;
       const key = `${seg.id}::${lang}`;
-      // Record a new take with the CURRENT voice + pace settings, then play.
-      _recordTake(proj, seg, lang, { voiceName, pace, sourceText: text });
-      __m_audio_speech.speak(text, {
-        voiceName, pace, langCode: lang, key,
-        onError: (e) => __m_ui_toast.show(`Speech failed: ${e.error || e.message || 'unknown'}`, 'err'),
+      _recordTake(proj, seg, lang, { voiceName: null, pace, sourceText: text });
+      __m_tts_mms.speak(text, {
+        langCode: lang, paceRate, key,
+        onError: (e) => __m_ui_toast.show(`Speech failed: ${e.message || 'unknown'}`, 'err'),
       });
     }
 
@@ -3934,9 +4072,8 @@
 
     __m_core_events.on('translate:status', onTranslateStatus);
 
-    // Highlight the active "Speak" button while Web Speech utterance is running.
-    __m_audio_speech.onActiveChange(({ active, key }) => {
-      // Clear previous highlights
+    // Highlight the active Speak button while a TTS playback is running.
+    __m_tts_mms.onActiveChange(({ active, key }) => {
       main.querySelectorAll('.lang-cell-btn.playing').forEach(b => b.classList.remove('playing'));
       if (active && key) {
         const [segId, lang] = key.split('::');
@@ -3991,12 +4128,11 @@
         .map(p => `<option value="${p}">${__m_core_html.esc(p.replace('_',' '))}</option>`).join('');
       const voicesBlock = `
         <div class="setting-block">
-          <h4>Voices &amp; paces</h4>
-          <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Web Speech voices on this device. Indic Parler-TTS is on the Layer 4 roadmap.</div>
+          <h4>Audio</h4>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:8px">On-device TTS via Facebook MMS-TTS — one VITS model per language (~50-150 MB), downloaded + cached on first speak. No system voice dependency. Indic Parler-TTS is the higher-quality opt-in tier (separate track).</div>
           <label style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;display:block;margin-bottom:4px">Default pace</label>
           <select id="ed-default-pace" style="width:100%;padding:6px 8px;border:1px solid var(--border-2);border-radius:4px;font-size:13px;background:var(--panel);color:var(--ink);margin-bottom:12px">${paceOpts}</select>
           <div id="ed-voices"></div>
-          <div style="font-size:10px;color:var(--muted);margin-top:6px">Languages with no native voice on this device fall back to garbled English-phoneme rendering — install OS voices (macOS: System Settings → Accessibility → Spoken Content → System Voice → Manage Voices…) for clean audio.</div>
         </div>
       `;
 
@@ -4027,7 +4163,7 @@
         ${lexiconBlock}
         <div class="setting-block">
           <h4>About this layer</h4>
-          <div class="setting-row" style="font-size:12px;color:var(--muted)">Layer 2 ships Web Speech audio + take history + lexicon UI. The IVR DAG editor and announcement-domain UI come in Layer 3; high-quality Indic Parler-TTS is the Layer 4 toggle.</div>
+          <div class="setting-row" style="font-size:12px;color:var(--muted)">Layer 2 ships on-device TTS via MMS-TTS (no system voices), take history, lexicon UI. The IVR DAG editor and announcement-domain UI come in Layer 3; Indic Parler-TTS is the higher-quality opt-in tier (separate track, in progress).</div>
         </div>
       `;
 
@@ -4148,53 +4284,33 @@
     async function renderVoicesBlock(proj, canEdit) {
       const host = $('#ed-voices', rail);
       if (!host) return;
-      host.innerHTML = '<div style="font-size:11px;color:var(--muted)">Loading voices…</div>';
-      await __m_audio_speech.ensureVoices();
       host.innerHTML = '';
       const paceList = ['very_slow','slow','moderate','fast','very_fast'];
-      const missing = [];
+      const unsupported = [];
       for (const lang of (proj.langs || [])) {
         const meta = __m_data_lang.LANGUAGES[lang];
         if (!meta) continue;
-        const voices = __m_audio_speech.listForLang(lang);
-        if (!voices.length && lang !== 'en') missing.push(meta.name);
+        const supported = __m_tts_mms.isLangSupported(lang);
+        if (!supported) unsupported.push(meta.name);
         const wrap = document.createElement('div');
         wrap.style.marginBottom = '10px';
-        // Show the auto-picked voice in the "(default)" label so the user
-        // knows what'll actually be used when no explicit voice is set.
-        const autoVoice = voices[0];
-        const autoLabel = autoVoice
-          ? `(auto · ${__m_audio_speech.shortName(autoVoice)} · ${autoVoice.lang})`
-          : (lang === 'en' ? '(device default)' : '(no voice installed)');
+        const modelId = __m_tts_mms.modelFor(lang);
+        const subText = supported
+          ? `<span style="text-transform:none;letter-spacing:0;color:var(--muted);font-size:10px">${__m_core_html.esc(modelId)}</span>`
+          : `<span style="color:var(--err-text);text-transform:none;letter-spacing:0;font-size:10px">no MMS model — Parler tier needed</span>`;
         wrap.innerHTML = `
-          <label style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;display:block;margin-bottom:4px">${__m_core_html.esc(meta.name)}${voices.length === 0 && lang !== 'en' ? ' <span style="color:var(--err-text);text-transform:none;letter-spacing:0">no voice installed</span>' : ''}</label>
+          <label style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;display:block;margin-bottom:4px">${__m_core_html.esc(meta.name)} · ${subText}</label>
           <div style="display:flex;gap:6px">
-            <select data-vlang="${lang}" data-role="voice" style="flex:1;padding:5px 6px;border:1px solid var(--border-2);border-radius:4px;font-size:12px;background:var(--panel);color:var(--ink)">
-              <option value="">${__m_core_html.esc(autoLabel)}</option>
-              ${voices.map(v => `<option value="${__m_core_html.esc(v.name)}">${__m_core_html.esc(__m_audio_speech.shortName(v))} · ${__m_core_html.esc(v.lang)}</option>`).join('')}
-            </select>
-            <select data-vlang="${lang}" data-role="pace" style="width:110px;padding:5px 6px;border:1px solid var(--border-2);border-radius:4px;font-size:12px;background:var(--panel);color:var(--ink)">
-              <option value="">(default)</option>
+            <select data-vlang="${lang}" data-role="pace" style="flex:1;padding:5px 6px;border:1px solid var(--border-2);border-radius:4px;font-size:12px;background:var(--panel);color:var(--ink)" ${supported ? '' : 'disabled'}>
+              <option value="">(default pace)</option>
               ${paceList.map(p => `<option value="${p}">${p.replace('_',' ')}</option>`).join('')}
             </select>
           </div>
         `;
         host.appendChild(wrap);
-        const voiceSel = wrap.querySelector('[data-role="voice"]');
-        const paceSel  = wrap.querySelector('[data-role="pace"]');
-        voiceSel.value = proj.voices?.[lang] || '';
-        paceSel.value  = proj.paces?.[lang]  || '';
-        voiceSel.disabled = !canEdit;
-        paceSel.disabled  = !canEdit;
-        voiceSel.onchange = async () => {
-          proj.voices = proj.voices || {};
-          if (voiceSel.value) proj.voices[lang] = voiceSel.value;
-          else delete proj.voices[lang];
-          try {
-            await __m_storage_projects.save(proj);
-            __m_ui_toast.show(`Voice updated for ${meta.name}. Click ⟳ on a cell to regenerate.`, 'ok', 3200);
-          } catch (e) { __m_ui_toast.show(e.message, 'err'); }
-        };
+        const paceSel = wrap.querySelector('[data-role="pace"]');
+        paceSel.value = proj.paces?.[lang] || '';
+        paceSel.disabled = !canEdit || !supported;
         paceSel.onchange = async () => {
           proj.paces = proj.paces || {};
           if (paceSel.value) proj.paces[lang] = paceSel.value;
@@ -4226,28 +4342,52 @@
   // BOOT
   // ═══════════════════════════════════════════════════════════════════════════
 
-  // Model status bar wiring — surface model download progress while a translate
-  // job kicks off. Uses one bar shared across all segments.
+  // Model status bar wiring — surface model download progress for both the
+  // translation pipeline (IndicTrans2) and the per-language TTS model (MMS).
   (() => {
     const bar = $('#model-status');
     const label = $('#model-status-label');
     const pct = $('#model-status-pct');
     const fill = $('#model-status-fill');
     let hideTimer = null;
-    __m_core_events.on('model:progress', (p) => {
-      if (!p) return;
+
+    function showProgress(text, pctNum) {
       bar.classList.add('visible');
       if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+      label.textContent = text;
+      const p = Math.max(0, Math.min(1, pctNum ?? 0));
+      pct.textContent = `${Math.round(p * 100)}%`;
+      fill.style.width = `${(p * 100).toFixed(1)}%`;
+    }
+    function hideAfter(ms = 2000) {
+      hideTimer = setTimeout(() => bar.classList.remove('visible'), ms);
+    }
+
+    __m_core_events.on('model:progress', (p) => {
+      if (!p) return;
       const labelText = p.phase === 'downloading' ? `Downloading ${p.file}…`
                       : p.phase === 'init'         ? `Initialising ${p.file}…`
                       : p.phase === 'ready'        ? 'Translation model ready'
                                                     : 'Loading translation model…';
-      label.textContent = labelText;
-      const pctNum = Math.max(0, Math.min(1, p.pct ?? 0));
-      pct.textContent = `${Math.round(pctNum * 100)}%`;
-      fill.style.width = `${(pctNum * 100).toFixed(1)}%`;
-      if (p.phase === 'ready') {
-        hideTimer = setTimeout(() => bar.classList.remove('visible'), 2000);
+      showProgress(labelText, p.pct);
+      if (p.phase === 'ready') hideAfter();
+    });
+
+    // MMS-TTS download/init progress (per-lang)
+    __m_tts_mms.onProgress((p) => {
+      if (!p) return;
+      const lang = p.langCode || '';
+      const status = p.status || '';
+      // transformers.js progress shape: { status: 'progress'|'done'|'initiate'|'download', file, progress, loaded, total, name }
+      if (status === 'progress' && typeof p.progress === 'number') {
+        showProgress(`TTS · ${lang} · ${p.file || ''}`, p.progress / 100);
+      } else if (status === 'download') {
+        showProgress(`TTS · ${lang} · ${p.file || ''} starting…`, 0);
+      } else if (status === 'done') {
+        showProgress(`TTS · ${lang} ready`, 1);
+        hideAfter();
+      } else if (status === 'initiate') {
+        showProgress(`TTS · ${lang} · ${p.file || ''} fetching…`, 0);
       }
     });
   })();
@@ -4262,10 +4402,6 @@
     setTimeout(() => __m_ui_modal.maybeShowIntro(), 200);
     __m_core_events.on('session:attached', () => __m_ui_router.render());
     __m_core_events.on('session:detached', () => __m_ui_router.render());
-    // Pre-warm Web Speech voice catalog (some browsers don't fire voiceschanged
-    // until the first speak, so kicking off the load now means the rail's
-    // dropdowns are populated before the user clicks).
-    __m_audio_speech.ensureVoices().catch(() => {});
     // Expose for debug only — opt-in console access.
     window.__ghoshana = {
       state: __m_core_state.state,
@@ -4277,7 +4413,8 @@
         translate: __m_pipeline_translate,
         queue: __m_pipeline_queue,
         lexicon: __m_pipeline_lexicon,
-      }
+      },
+      tts: __m_tts_mms,
     };
   })();
   </script>
