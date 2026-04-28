@@ -1,0 +1,3423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="author" content="Chirag Patnaik">
+  <meta name="version" content="0.1.0">
+  <meta name="description" content="Ghoshana — browser-native project authoring for the prashnam-voice family. Pick a folder, create polls / announcements / IVR projects, all on-device.">
+  <title>Ghoshana — Browser-native project authoring</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='18' fill='%230f4c5c'/%3E%3Ctext x='50' y='70' font-size='62' font-family='system-ui,sans-serif' font-weight='800' text-anchor='middle' fill='%23e09f3e'%3EG%3C/text%3E%3C/svg%3E">
+  <link rel="manifest" href='data:application/json,{"name":"Ghoshana","short_name":"Ghoshana","start_url":".","display":"standalone","background_color":"%23fff9f0","theme_color":"%230f4c5c"}'>
+
+  <!-- ONNX Runtime Web (WASM/WebGPU backends) — pinned to match Anuvaad. -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js"></script>
+
+  <style>
+    /* ── Palette · Teal / Amber / Parchment ────────────────────────────────── */
+    :root {
+      --bg:        #fff9f0;
+      --panel:     #ffffff;
+      --panel-2:   #f7efde;
+      --ink:       #1c2024;
+      --ink-2:     #4a4a4a;
+      --muted:     #7a7068;
+      --border:    #e6dccd;
+      --border-2:  #d6c9b1;
+      --teal:      #0f4c5c;
+      --teal-600:  #0a3744;
+      --teal-50:   #d6e3e7;
+      --amber:     #e09f3e;
+      --amber-600: #b87c1f;
+      --amber-50:  #fbe8c8;
+      --ok-bg:     #dceadb;
+      --ok-text:   #0a3014;
+      --ok-border: #2a8a3a;
+      --warn-bg:   #fde6c4;
+      --warn-text: #744210;
+      --warn-border:#c08018;
+      --err-bg:    #f8d4dc;
+      --err-text:  #6a0a30;
+      --err-border:#b81848;
+      --on-teal:   #fff9f0;
+      --on-amber:  #1c2024;
+      --shadow-sm: 0 1px 3px rgba(28,32,36,0.06);
+      --shadow-md: 0 6px 22px rgba(28,32,36,0.10);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body { height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+      line-height: 1.5;
+      min-height: 100%;
+      padding-bottom: 64px;
+    }
+
+    /* ── Header ──────────────────────────────────────────────────────────── */
+    header#app-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 24px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      box-shadow: var(--shadow-sm);
+    }
+    .brand {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--teal);
+      letter-spacing: -0.01em;
+    }
+    .brand .devanagari {
+      color: var(--amber);
+      font-weight: 800;
+    }
+    .brand .editor-back {
+      cursor: pointer;
+      color: var(--muted);
+      margin-right: 4px;
+      font-size: 18px;
+      user-select: none;
+    }
+    .brand .editor-back:hover { color: var(--teal); }
+    .brand .editor-name {
+      color: var(--ink);
+      font-weight: 600;
+      font-size: 18px;
+      cursor: pointer;
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 1px solid transparent;
+    }
+    .brand .editor-name:hover { background: var(--panel-2); border-color: var(--border); }
+    .header-spacer { flex: 1; margin-left: 8px; }
+    .folder-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      font-size: 12px;
+      color: var(--muted);
+      max-width: 240px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .folder-pill.reconnect {
+      background: var(--warn-bg);
+      color: var(--warn-text);
+      border-color: var(--warn-border);
+      cursor: pointer;
+    }
+    .folder-pill.reconnect:hover { background: #ffd699; }
+    .icon-btn {
+      width: 32px;
+      height: 32px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 50%;
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 600;
+      transition: all 0.1s;
+    }
+    .icon-btn:hover { background: var(--teal-50); color: var(--teal); border-color: var(--teal); }
+    .icon-btn.danger:hover { background: var(--err-bg); color: var(--err-text); border-color: var(--err-border); }
+
+    /* ── Screens ─────────────────────────────────────────────────────────── */
+    .screen { display: none; padding: 24px; max-width: 1100px; margin: 0 auto; }
+    .screen.active { display: block; }
+
+    /* Welcome */
+    #screen-welcome { padding: 60px 24px; text-align: center; }
+    #screen-welcome h1 {
+      font-size: 44px;
+      color: var(--teal);
+      margin-bottom: 12px;
+      letter-spacing: -0.02em;
+    }
+    #screen-welcome h1 .devanagari { color: var(--amber); margin-right: 12px; }
+    #screen-welcome .tagline {
+      font-size: 17px;
+      color: var(--muted);
+      margin-bottom: 36px;
+      max-width: 520px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    #screen-welcome .browser-warn {
+      margin-top: 28px;
+      padding: 12px 16px;
+      background: var(--warn-bg);
+      color: var(--warn-text);
+      border: 1px solid var(--warn-border);
+      border-radius: 8px;
+      font-size: 13px;
+      max-width: 520px;
+      margin-left: auto;
+      margin-right: auto;
+      display: none;
+    }
+    #screen-welcome .browser-warn.visible { display: block; }
+
+    /* Project list */
+    #screen-list h2 {
+      font-size: 22px;
+      color: var(--ink);
+      margin-bottom: 16px;
+      font-weight: 600;
+    }
+    .project-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 14px;
+    }
+    .project-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      cursor: pointer;
+      position: relative;
+      transition: all 0.1s;
+    }
+    .project-card:hover {
+      border-color: var(--teal);
+      box-shadow: var(--shadow-md);
+      transform: translateY(-1px);
+    }
+    .project-card .name {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--ink);
+      margin-bottom: 8px;
+      padding-right: 28px;
+      word-break: break-word;
+    }
+    .project-card .meta {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .project-card .domain-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      background: var(--teal-50);
+      color: var(--teal);
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      margin-right: 8px;
+    }
+    .project-card .lang-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+    .project-card .lang-chip {
+      font-size: 11px;
+      padding: 2px 6px;
+      background: var(--panel-2);
+      color: var(--muted);
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .project-card .overflow {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      width: 26px;
+      height: 26px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 4px;
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1;
+    }
+    .project-card .overflow:hover { background: var(--panel-2); color: var(--ink); }
+
+    .empty-state {
+      text-align: center;
+      padding: 60px 24px;
+      color: var(--muted);
+    }
+    .empty-state .emoji { font-size: 48px; margin-bottom: 12px; }
+    .empty-state .title { font-size: 18px; color: var(--ink-2); margin-bottom: 6px; }
+    .empty-state .hint { font-size: 14px; }
+
+    /* Editor */
+    #screen-editor .editor-layout {
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      gap: 20px;
+    }
+    @media (max-width: 800px) {
+      #screen-editor .editor-layout { grid-template-columns: 1fr; }
+    }
+    #screen-editor .editor-main {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 28px;
+    }
+    #screen-editor .editor-main .placeholder-card {
+      background: var(--amber-50);
+      border: 1px dashed var(--amber);
+      border-radius: 8px;
+      padding: 28px;
+      text-align: center;
+    }
+    #screen-editor .editor-main .placeholder-card h3 {
+      font-size: 17px;
+      color: var(--amber-600);
+      margin-bottom: 8px;
+    }
+    #screen-editor .editor-main .placeholder-card p {
+      font-size: 14px;
+      color: var(--ink-2);
+      max-width: 420px;
+      margin: 0 auto;
+    }
+    #screen-editor .settings-rail {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px;
+      align-self: start;
+      position: sticky;
+      top: 76px;
+    }
+    #screen-editor .settings-rail h4 {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin-bottom: 6px;
+      font-weight: 600;
+    }
+    #screen-editor .settings-rail .setting-block {
+      margin-bottom: 18px;
+      padding-bottom: 18px;
+      border-bottom: 1px solid var(--border);
+    }
+    #screen-editor .settings-rail .setting-block:last-child {
+      border-bottom: none;
+      padding-bottom: 0;
+      margin-bottom: 0;
+    }
+    #screen-editor .settings-rail .setting-row {
+      font-size: 13px;
+      color: var(--ink-2);
+    }
+    #screen-editor .settings-rail .setting-row + .setting-row { margin-top: 4px; }
+    #screen-editor .settings-rail .setting-row .k { color: var(--muted); }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 18px;
+      background: var(--teal);
+      color: var(--on-teal);
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: inherit;
+      transition: all 0.1s;
+    }
+    .btn:hover:not(:disabled) { background: var(--teal-600); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn.btn-lg { padding: 14px 28px; font-size: 15px; }
+    .btn.btn-amber { background: var(--amber); color: var(--on-amber); }
+    .btn.btn-amber:hover:not(:disabled) { background: var(--amber-600); color: var(--on-teal); }
+    .btn.btn-secondary {
+      background: var(--panel);
+      color: var(--ink-2);
+      border: 1px solid var(--border-2);
+    }
+    .btn.btn-secondary:hover:not(:disabled) { background: var(--panel-2); border-color: var(--teal); color: var(--teal); }
+    .btn.btn-danger {
+      background: var(--err-bg);
+      color: var(--err-text);
+      border: 1px solid var(--err-border);
+    }
+    .btn.btn-danger:hover:not(:disabled) { background: #f3bbc7; }
+
+    /* FAB */
+    .fab {
+      position: fixed;
+      right: 28px;
+      bottom: 80px;
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: var(--amber);
+      color: var(--on-amber);
+      border: none;
+      font-size: 26px;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: var(--shadow-md);
+      transition: all 0.1s;
+      z-index: 5;
+    }
+    .fab:hover { background: var(--amber-600); color: var(--on-teal); transform: scale(1.04); }
+
+    /* ── Modal ───────────────────────────────────────────────────────────── */
+    #modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(28,32,36,0.45);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      z-index: 100;
+    }
+    #modal-overlay.visible { display: flex; }
+    .modal {
+      background: var(--panel);
+      border-radius: 12px;
+      max-width: 520px;
+      width: 100%;
+      max-height: 86vh;
+      overflow-y: auto;
+      box-shadow: var(--shadow-md);
+      animation: modal-in 0.12s ease-out;
+    }
+    @keyframes modal-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+    .modal.modal-wide { max-width: 720px; }
+    .modal-head {
+      padding: 18px 22px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .modal-head h3 {
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--ink);
+    }
+    .modal-body {
+      padding: 18px 22px;
+    }
+    .modal-foot {
+      padding: 14px 22px 18px;
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+
+    .modal-tabs {
+      display: flex;
+      gap: 4px;
+      padding: 0 22px;
+      border-bottom: 1px solid var(--border);
+    }
+    .modal-tab {
+      padding: 10px 14px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--muted);
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      font-weight: 500;
+    }
+    .modal-tab.active { color: var(--teal); border-bottom-color: var(--teal); font-weight: 600; }
+    .modal-tab:hover { color: var(--teal); }
+    .modal-pane { display: none; padding: 18px 22px; }
+    .modal-pane.active { display: block; }
+    .modal-pane p { margin-bottom: 10px; font-size: 14px; color: var(--ink-2); }
+    .modal-pane code {
+      background: var(--panel-2);
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-size: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .modal-pane ul { padding-left: 22px; margin-bottom: 12px; }
+    .modal-pane ul li { font-size: 14px; color: var(--ink-2); margin-bottom: 4px; }
+
+    /* Form widgets */
+    .form-row { margin-bottom: 16px; }
+    .form-row label {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 600;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .form-row input[type=text] {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid var(--border-2);
+      border-radius: 6px;
+      font-size: 15px;
+      font-family: inherit;
+      background: var(--panel);
+      color: var(--ink);
+    }
+    .form-row input[type=text]:focus {
+      outline: 2px solid var(--teal);
+      outline-offset: -1px;
+    }
+    .radio-group { display: flex; flex-direction: column; gap: 8px; }
+    .radio-option {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.1s;
+    }
+    .radio-option:hover { background: var(--panel-2); border-color: var(--border-2); }
+    .radio-option input { margin-top: 3px; }
+    .radio-option.selected { background: var(--teal-50); border-color: var(--teal); }
+    .radio-option .radio-label { font-weight: 600; color: var(--ink); font-size: 14px; }
+    .radio-option .radio-desc { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+    .lang-chips-input {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .lang-chip-input {
+      padding: 6px 10px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.1s;
+      user-select: none;
+    }
+    .lang-chip-input:hover { border-color: var(--teal); }
+    .lang-chip-input.selected {
+      background: var(--teal);
+      color: var(--on-teal);
+      border-color: var(--teal);
+      font-weight: 600;
+    }
+
+    /* ── Toast ───────────────────────────────────────────────────────────── */
+    #toast-stack {
+      position: fixed;
+      bottom: 80px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      z-index: 200;
+      pointer-events: none;
+    }
+    .toast {
+      padding: 10px 18px;
+      background: var(--ink);
+      color: var(--bg);
+      border-radius: 22px;
+      font-size: 13px;
+      box-shadow: var(--shadow-md);
+      animation: toast-in 0.15s ease-out;
+      pointer-events: auto;
+    }
+    .toast.warn { background: var(--warn-text); }
+    .toast.err { background: var(--err-text); }
+    .toast.ok { background: var(--ok-border); }
+    @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+    /* ── Footer ──────────────────────────────────────────────────────────── */
+    .footer-nav {
+      position: fixed;
+      bottom: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 24px;
+      background: rgba(255,249,240,0.92);
+      padding: 6px 18px;
+      border-radius: 20px;
+      box-shadow: 0 1px 6px rgba(0,0,0,0.06);
+      font-size: 0.72rem;
+      backdrop-filter: blur(6px);
+    }
+    .footer-nav a {
+      color: var(--teal);
+      text-decoration: none;
+    }
+    .footer-nav a:hover { text-decoration: underline; }
+
+    /* Overflow menu (per-card) */
+    .overflow-menu {
+      position: fixed;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      box-shadow: var(--shadow-md);
+      padding: 4px 0;
+      min-width: 140px;
+      z-index: 50;
+      display: none;
+    }
+    .overflow-menu.visible { display: block; }
+    .overflow-menu .item {
+      padding: 8px 14px;
+      font-size: 13px;
+      cursor: pointer;
+      color: var(--ink-2);
+    }
+    .overflow-menu .item:hover { background: var(--panel-2); color: var(--ink); }
+    .overflow-menu .item.danger:hover { background: var(--err-bg); color: var(--err-text); }
+
+    /* ── Segment editor (Layer 1) ───────────────────────────────────────── */
+    .model-status-bar {
+      background: var(--amber-50);
+      border: 1px solid var(--amber);
+      border-radius: 8px;
+      padding: 10px 14px;
+      margin-bottom: 14px;
+      font-size: 13px;
+      color: var(--warn-text);
+      display: none;
+    }
+    .model-status-bar.visible { display: block; }
+    .model-status-bar .progress-row { display: flex; justify-content: space-between; margin-bottom: 6px; }
+    .model-status-bar .progress-bar {
+      height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden;
+    }
+    .model-status-bar .progress-fill {
+      height: 100%; background: var(--amber); width: 0%; transition: width 0.2s ease;
+    }
+
+    .seg-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      margin-bottom: 12px;
+    }
+    .seg-head {
+      display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+    }
+    .seg-badge {
+      display: inline-block;
+      padding: 3px 10px;
+      background: var(--panel-2);
+      color: var(--muted);
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .seg-badge.primary { background: var(--teal); color: var(--on-teal); }
+    .seg-actions { margin-left: auto; display: flex; gap: 6px; }
+    .seg-action-btn {
+      background: none; border: 1px solid var(--border);
+      padding: 4px 10px; border-radius: 4px; font-size: 12px;
+      color: var(--muted); cursor: pointer;
+    }
+    .seg-action-btn:hover:not(:disabled) { color: var(--ink); border-color: var(--border-2); }
+    .seg-action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .seg-action-btn.danger:hover:not(:disabled) { color: var(--err-text); border-color: var(--err-border); }
+    .seg-textarea {
+      width: 100%; min-height: 56px; padding: 10px 12px;
+      border: 1px solid var(--border-2); border-radius: 6px;
+      font-size: 15px; font-family: inherit; resize: vertical;
+      background: var(--panel); color: var(--ink);
+    }
+    .seg-textarea:focus { outline: 2px solid var(--teal); outline-offset: -1px; }
+    .seg-effective {
+      font-size: 12px; color: var(--muted); margin-top: 8px;
+      padding: 6px 10px; background: var(--panel-2);
+      border-radius: 4px; white-space: pre-wrap;
+    }
+    .seg-effective .k { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.7; }
+    .lang-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .lang-cell {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 10px;
+      background: var(--panel-2);
+    }
+    .lang-cell-head {
+      display: flex; align-items: center; gap: 6px;
+      margin-bottom: 4px;
+    }
+    .lang-cell-name {
+      font-size: 11px; font-weight: 700;
+      letter-spacing: 0.05em; color: var(--teal);
+      text-transform: uppercase;
+    }
+    .lang-cell-text {
+      font-size: 14px; color: var(--ink); min-height: 24px;
+      word-break: break-word;
+    }
+    .lang-cell-text.empty {
+      color: var(--muted); font-style: italic; font-size: 12px;
+    }
+    .lang-cell-status {
+      font-size: 10px; padding: 1px 6px; border-radius: 3px;
+      display: inline-block;
+      text-transform: uppercase; letter-spacing: 0.04em; font-weight: 700;
+      margin-left: auto;
+    }
+    .status-empty { background: var(--border); color: var(--muted); }
+    .status-pending { background: var(--warn-bg); color: var(--warn-text); }
+    .status-translating { background: var(--amber-50); color: var(--amber-600); }
+    .status-ready { background: var(--ok-bg); color: var(--ok-text); }
+    .status-stale { background: var(--warn-bg); color: var(--warn-text); }
+    .status-error { background: var(--err-bg); color: var(--err-text); }
+    .lang-cell-retry {
+      font-size: 11px; color: var(--teal); cursor: pointer;
+      margin-top: 4px; text-decoration: underline;
+    }
+    .lang-cell-retry:hover { color: var(--teal-600); }
+    .add-segment-row { margin-top: 10px; }
+    .add-segment-btn {
+      background: var(--panel); border: 1px dashed var(--border-2);
+      color: var(--muted); padding: 10px 18px;
+      border-radius: 8px; font-size: 13px; font-weight: 600;
+      cursor: pointer; width: 100%;
+      transition: all 0.1s;
+    }
+    .add-segment-btn:hover { color: var(--teal); border-color: var(--teal); border-style: solid; }
+    .seg-empty-state {
+      text-align: center; padding: 40px 20px; color: var(--muted);
+    }
+    .seg-empty-state .emoji { font-size: 36px; margin-bottom: 10px; }
+    .seg-empty-state .title { font-size: 15px; color: var(--ink-2); margin-bottom: 4px; }
+    .seg-empty-state .hint { font-size: 12px; margin-bottom: 14px; }
+    .seg-empty-state .btn { margin: 4px; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header id="app-header">
+      <div class="brand" id="brand">
+        <span class="devanagari">घ</span>Ghoshana
+      </div>
+      <div class="header-spacer"></div>
+      <span id="folder-pill" class="folder-pill" style="display:none"></span>
+      <button class="icon-btn" id="btn-disconnect" title="Disconnect folder" style="display:none">⨯</button>
+      <button class="icon-btn" id="btn-help" title="Help">?</button>
+    </header>
+
+    <main id="screen-welcome" class="screen">
+      <h1><span class="devanagari">घ</span>Ghoshana</h1>
+      <p class="tagline">On-device project authoring for the prashnam-voice family. Pick a folder; your projects live as plain JSON inside it.</p>
+      <button class="btn btn-lg" id="btn-pick-folder">📂 Pick a folder to get started</button>
+      <div class="browser-warn" id="welcome-warn">
+        Your browser doesn't support the File System Access API. Ghoshana needs Chrome, Edge, or Firefox on desktop.
+      </div>
+    </main>
+
+    <main id="screen-list" class="screen">
+      <h2>Your projects</h2>
+      <div id="project-grid" class="project-grid"></div>
+      <div id="project-empty" class="empty-state" style="display:none">
+        <div class="emoji">📋</div>
+        <div class="title">No projects yet</div>
+        <div class="hint">Tap the + button to create your first one.</div>
+      </div>
+      <button class="fab" id="btn-new-project" title="New project">+</button>
+    </main>
+
+    <main id="screen-editor" class="screen">
+      <div id="model-status" class="model-status-bar">
+        <div class="progress-row">
+          <span id="model-status-label">Downloading translation model…</span>
+          <span id="model-status-pct">0%</span>
+        </div>
+        <div class="progress-bar"><div id="model-status-fill" class="progress-fill"></div></div>
+      </div>
+      <div class="editor-layout">
+        <div class="editor-main" id="editor-main"></div>
+        <aside class="settings-rail" id="settings-rail"></aside>
+      </div>
+    </main>
+
+    <div id="modal-overlay"></div>
+    <div id="toast-stack"></div>
+    <div id="overflow-menu" class="overflow-menu"></div>
+
+    <div class="footer-nav">
+      <a href="https://naklitechie.github.io/" target="_blank" rel="noopener">⬅ More Projects</a>
+      <a href="https://github.com/NakliTechie/Ghoshana" target="_blank" rel="noopener">⌨ Source</a>
+    </div>
+  </div>
+
+  <script>
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PIPELINE CLASSES — IndicProcessor + IT2Tokenizer + BPETokenizer
+  //
+  // Lifted verbatim from /Users/chiragpatnaik/Code/Browser/Anuvaad/index.html
+  // lines 368-1206. Validated 528/528 fixtures vs Python IndicProcessor and
+  // 4/4 vs Python tokenizers.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const __m_pipeline_classes = (() => {
+
+  // FLORES code → ISO 639-1 (or pseudo-code). From processor.pyx:59-94.
+  const FLORES_TO_ISO = {
+    asm_Beng: "as", awa_Deva: "hi", ben_Beng: "bn", bho_Deva: "hi",
+    brx_Deva: "hi", doi_Deva: "hi", eng_Latn: "en", gom_Deva: "kK",
+    gon_Deva: "hi", guj_Gujr: "gu", hin_Deva: "hi", hne_Deva: "hi",
+    kan_Knda: "kn", kas_Arab: "ur", kas_Deva: "hi", kha_Latn: "en",
+    lus_Latn: "en", mag_Deva: "hi", mai_Deva: "hi", mal_Mlym: "ml",
+    mar_Deva: "mr", mni_Beng: "bn", mni_Mtei: "hi", npi_Deva: "ne",
+    ory_Orya: "or", pan_Guru: "pa", san_Deva: "hi", sat_Olck: "or",
+    snd_Arab: "ur", snd_Deva: "hi", tam_Taml: "ta", tel_Telu: "te",
+    urd_Arab: "ur", unr_Deva: "hi",
+  };
+
+  const SCRIPT_RANGES = {
+    pa: [0x0a00, 0x0a7f], gu: [0x0a80, 0x0aff], or: [0x0b00, 0x0b7f],
+    ta: [0x0b80, 0x0bff], te: [0x0c00, 0x0c7f], kn: [0x0c80, 0x0cff],
+    ml: [0x0d00, 0x0d7f], si: [0x0d80, 0x0dff], hi: [0x0900, 0x097f],
+    mr: [0x0900, 0x097f], kK: [0x0900, 0x097f], sa: [0x0900, 0x097f],
+    ne: [0x0900, 0x097f], sd: [0x0900, 0x097f],
+    bn: [0x0980, 0x09ff], as: [0x0980, 0x09ff],
+  };
+
+  const COORDINATED_RANGE_START = 0x00;
+  const COORDINATED_RANGE_END   = 0x6f;
+
+  const INDIC_DIGIT_MAP = {
+    "০":"0","૦":"0","೦":"0","०":"0","٠":"0","꯰":"0","୦":"0","੦":"0","᱐":"0","۰":"0",
+    "১":"1","૧":"1","१":"1","೧":"1","۱":"1","꯱":"1","୧":"1","੧":"1","᱑":"1","౧":"1",
+    "২":"2","૨":"2","२":"2","೨":"2","۲":"2","꯲":"2","୨":"2","੨":"2","᱒":"2","౨":"2",
+    "৩":"3","૩":"3","३":"3","೩":"3","۳":"3","꯳":"3","୩":"3","੩":"3","᱓":"3","౩":"3",
+    "৪":"4","૪":"4","४":"4","೪":"4","۴":"4","꯴":"4","୪":"4","੪":"4","᱔":"4","౪":"4",
+    "৫":"5","૫":"5","५":"5","೫":"5","۵":"5","꯵":"5","୫":"5","੫":"5","᱕":"5","౫":"5",
+    "৬":"6","૬":"6","६":"6","೬":"6","۶":"6","꯶":"6","୬":"6","੬":"6","᱖":"6","౬":"6",
+    "৭":"7","૭":"7","७":"7","೭":"7","۷":"7","꯷":"7","୭":"7","੭":"7","᱗":"7","౭":"7",
+    "৮":"8","૮":"8","८":"8","೮":"8","۸":"8","꯸":"8","୮":"8","੮":"8","᱘":"8","౮":"8",
+    "৯":"9","૯":"9","९":"9","೯":"9","۹":"9","꯹":"9","୯":"9","੯":"9","᱙":"9","౯":"9",
+  };
+
+  const INDIC_FAILURE_CASES = [
+    "آی ڈی ", "ꯑꯥꯏꯗꯤ", "आईडी", "आई . डी . ", "आई . डी .",
+    "आई. डी. ", "आई. डी.", "आय. डी. ", "आय. डी.",
+    "आय . डी . ", "आय . डी .आइ . डी . ", "आइ . डी .",
+    "आइ. डी. ", "आइ. डी.", "ऐटि", "آئی ڈی ", "ᱟᱭᱰᱤ ᱾",
+    "आयडी", "ऐडि", "आइडि", "ᱟᱭᱰᱤ",
+  ];
+
+  const PUNC_REPLACEMENTS = [
+    [/\r/g, ""],
+    [/\(\s*/g, "("],
+    [/\s*\)/g, ")"],
+    [/\s:\s?/g, ":"],
+    [/\s;\s?/g, ";"],
+    [/[`´‘‚’]/g, "'"],
+    [/[„“”«»]/g, '"'],
+    [/[–—]/g, "-"],
+    [/\.\.\./g, "..."],
+    [/ %/g, "%"],
+    [/nº /g, "nº "],
+    [/ ºC/g, " ºC"],
+    [/ [?!;]/g, (m) => m.trim()],
+    [/, /g, ", "],
+  ];
+
+  const PATTERNS = {
+    email: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}/g,
+    url: /\b(?<![\w/.])(?:(?:https?|ftp):\/\/)?(?:(?:[\w-]+\.)+(?!\.))(?:[\w/\-?#&=%.]+)+(?!\.\w+)\b/g,
+    numeral: /(~?\d+\.?\d*\s?%?\s?-?\s?~?\d+\.?\d*\s?%|~?\d+%|\d+[-/.,:']\d+[-/.,:'+]\d+(?:\.\d+)?|\d+[-/.:'+]\d+(?:\.\d+)?)/g,
+    other: /[A-Za-z0-9]*[#|@]\w+/g,
+  };
+
+  const MULTISPACE_REGEX = /[ ]{2,}/g;
+  const END_BRACKET_SPACE_PUNC_REGEX = /\) ([.!:?;,])/g;
+  const DIGIT_SPACE_PERCENT = /(\d) %/g;
+  const DOUBLE_QUOT_PUNC = /"([,.]+)/g;
+  const DIGIT_NBSP_DIGIT = /(\d) (\d)/g;
+
+  function puncNorm(text) {
+    for (const [pat, repl] of PUNC_REPLACEMENTS) text = text.replace(pat, repl);
+    text = text.replace(MULTISPACE_REGEX, " ");
+    text = text.replace(END_BRACKET_SPACE_PUNC_REGEX, ")$1");
+    text = text.replace(DIGIT_SPACE_PERCENT, "$1%");
+    text = text.replace(DOUBLE_QUOT_PUNC, '$1"');
+    text = text.replace(DIGIT_NBSP_DIGIT, "$1.$2");
+    return text.trim();
+  }
+
+  function normalizeDigits(text) {
+    let out = "";
+    for (const ch of text) out += INDIC_DIGIT_MAP[ch] ?? ch;
+    return out;
+  }
+
+  function wrapWithPlaceholders(text) {
+    const map = {};
+    let serialNo = 1;
+    const orderedPatterns = [PATTERNS.email, PATTERNS.url, PATTERNS.numeral, PATTERNS.other];
+    for (const pattern of orderedPatterns) {
+      pattern.lastIndex = 0;
+      const matches = new Set();
+      let m;
+      while ((m = pattern.exec(text)) !== null) {
+        matches.add(m[0]);
+        if (m.index === pattern.lastIndex) pattern.lastIndex++;
+      }
+      for (const match of matches) {
+        if (pattern === PATTERNS.url) {
+          if (match.replace(/\./g, "").length < 4) continue;
+        }
+        if (pattern === PATTERNS.numeral) {
+          if (match.replace(/ /g, "").replace(/\./g, "").replace(/:/g, "").length < 4) continue;
+        }
+        const base = `<ID${serialNo}>`;
+        const variants = [
+          `<ID${serialNo}>`, `< ID${serialNo} >`, `[ID${serialNo}]`,
+          `[ ID${serialNo} ]`, `[ID ${serialNo}]`, `<ID${serialNo}]`,
+          `< ID${serialNo}]`, `<ID${serialNo} ]`,
+          `<id${serialNo}>`, `< id${serialNo} >`, `[id${serialNo}]`,
+          `[ id${serialNo} ]`, `[id ${serialNo}]`, `<id${serialNo}]`,
+          `< id${serialNo}]`, `<id${serialNo} ]`,
+        ];
+        for (const v of variants) map[v] = match;
+        for (const fc of INDIC_FAILURE_CASES) {
+          const combos = [
+            `<${fc}${serialNo}>`, `< ${fc}${serialNo} >`, `< ${fc} ${serialNo} >`,
+            `<${fc} ${serialNo}]`, `< ${fc} ${serialNo} ]`,
+            `[${fc}${serialNo}]`, `[${fc} ${serialNo}]`,
+            `[ ${fc}${serialNo} ]`, `[ ${fc} ${serialNo} ]`,
+            `${fc} ${serialNo}`, `${fc}${serialNo}`,
+          ];
+          for (const c of combos) map[c] = match;
+        }
+        text = text.split(match).join(base);
+        serialNo += 1;
+      }
+    }
+    text = text.replace(/\s+/g, " ").replace(/>\//g, ">").replace(/]\//g, "]");
+    return [text, map];
+  }
+
+  function restorePlaceholders(text, map) {
+    const keys = Object.keys(map).sort((a, b) => b.length - a.length);
+    for (const k of keys) text = text.split(k).join(map[k]);
+    return text;
+  }
+
+  function mosesPunctNormalize(text) {
+    return text
+      .replace(/\r/g, "")
+      .replace(/\(/g, " (")
+      .replace(/\)/g, ") ")
+      .replace(/ +/g, " ")
+      .replace(/\) ([.!:?;,])/g, ")$1")
+      .replace(/\( /g, "(")
+      .replace(/ \)/g, ")")
+      .replace(/(\d) %/g, "$1%")
+      .replace(/ :/g, ":")
+      .replace(/ ;/g, ";")
+      .replace(/`/g, "'")
+      .replace(/''/g, '"')
+      .trim();
+  }
+
+  function mosesTokenize(text) {
+    text = text.replace(/([,!?;:()\[\]{}"%₹$€£¥<>=+|@#])/g, " $1 ");
+    text = text.replace(/(\d)\.(\d)/g, "$1@@DEC@@$2");
+    text = text.replace(/\./g, " . ");
+    text = text.replace(/@@DEC@@/g, ".");
+    text = text.replace(/(\w)('s|'re|'ll|'d|'m|'t|'ve)\b/g, "$1 $2");
+    return text.replace(/\s+/g, " ").trim();
+  }
+
+  function correctTamilMapping(offset) {
+    if (
+      offset >= 0x15 && offset <= 0x28 &&
+      offset !== 0x1c &&
+      !((offset - 0x15) % 5 === 0 || (offset - 0x15) % 5 === 4)
+    ) {
+      const subst = Math.floor((offset - 0x15) / 5);
+      offset = 0x15 + 5 * subst;
+    }
+    if (offset === 0x2b || offset === 0x2c || offset === 0x2d) offset = 0x2a;
+    if (offset === 0x36) offset = 0x37;
+    return offset;
+  }
+
+  function transliterate(text, fromIso, toIso) {
+    if (fromIso === toIso) return text;
+    const fromR = SCRIPT_RANGES[fromIso];
+    const toR   = SCRIPT_RANGES[toIso];
+    if (!fromR || !toR) return text;
+    let out = "";
+    for (const ch of text) {
+      const cp = ch.codePointAt(0);
+      let offset = cp - fromR[0];
+      if (
+        offset >= COORDINATED_RANGE_START &&
+        offset <= COORDINATED_RANGE_END &&
+        ch !== "।" && ch !== "॥"
+      ) {
+        if (toIso === "ta") offset = correctTamilMapping(offset);
+        out += String.fromCodePoint(toR[0] + offset);
+      } else {
+        out += ch;
+      }
+    }
+    return out;
+  }
+
+  function trivialDetokenize(text) {
+    const patNumSeq = /([0-9]+ [,.:/] )+[0-9]+/g;
+    text = text.replace(patNumSeq, (m) => m.replace(/ /g, ""));
+    text = text.replace(/ ([\-/\\]) /g, "$1");
+    text = text.replace(/ ([!%)\]},.:;>?।॥])/g, "$1");
+    text = text.replace(/([#$(\[{<@]) /g, "$1");
+    for (const punc of ["'", '"', "`"]) {
+      let cnt = 0; let buf = "";
+      for (const c of text) {
+        if (c === punc) { buf += cnt % 2 === 0 ? "@RA" : "@LA"; cnt += 1; }
+        else buf += c;
+      }
+      text = buf
+        .split(`@RA `).join(punc).split(` @LA`).join(punc)
+        .split("@RA").join(punc).split("@LA").join(punc);
+    }
+    return text;
+  }
+
+  function _mosesDetokenizeEnglish(tokens) {
+    let text = tokens.join(" ");
+    text = text.replace(/ ([.,!?;:%)\]}>])/g, "$1");
+    text = text.replace(/([(\[{<]) /g, "$1");
+    text = text.replace(/(\w) ('s|'re|'ll|'d|'m|'t|'ve)\b/g, "$1$2");
+    for (const punc of ['"', "'"]) {
+      let cnt = 0; let buf = "";
+      for (const c of text) {
+        if (c === punc) { buf += cnt % 2 === 0 ? "@RA" : "@LA"; cnt += 1; }
+        else buf += c;
+      }
+      text = buf
+        .split(`@RA `).join(punc).split(` @LA`).join(punc)
+        .split("@RA").join(punc).split("@LA").join(punc);
+    }
+    return text.replace(/\s+/g, " ").trim();
+  }
+
+  class IndicProcessor {
+    constructor({ inference = true } = {}) {
+      this.inference = inference;
+      this._queue = [];
+    }
+    resetQueue() { this._queue = []; }
+
+    _preprocess(sent, srcLang, tgtLang, isTarget) {
+      const isoLang = FLORES_TO_ISO[srcLang] ?? "hi";
+      const scriptPart = srcLang.split("_")[1];
+      const doTransliterate = !["Arab", "Aran", "Olck", "Mtei", "Latn"].includes(scriptPart);
+      sent = puncNorm(sent);
+      sent = normalizeDigits(sent);
+      if (this.inference) {
+        const [masked, map] = wrapWithPlaceholders(sent);
+        sent = masked; this._queue.push(map);
+      }
+      let processed;
+      if (isoLang === "en") {
+        const stripped = sent.trim();
+        const normed = mosesPunctNormalize(stripped);
+        processed = mosesTokenize(normed);
+      } else {
+        processed = sent.trim();
+        if (doTransliterate) {
+          processed = transliterate(processed, isoLang, "hi").replace(/ ् /g, "्");
+        }
+      }
+      processed = processed.trim();
+      return isTarget ? processed : `${srcLang} ${tgtLang} ${processed}`;
+    }
+
+    _postprocess(sent, lang, providedMap = null) {
+      if (Array.isArray(sent)) sent = sent[0];
+      const map = providedMap ?? this._queue.shift() ?? {};
+      const [langCode, scriptCode] = lang.split("_", 2);
+      const isoLang = FLORES_TO_ISO[lang] ?? "hi";
+      if (scriptCode === "Arab" || scriptCode === "Aran") {
+        sent = sent.replace(/ ؟/g, "؟").replace(/ ۔/g, "۔")
+                   .replace(/ ،/g, "،").replace(/ٮ۪/g, "ؠ");
+      }
+      if (langCode === "ory") sent = sent.replace(/ଯ଼/g, "ୟ");
+      sent = restorePlaceholders(sent, map);
+      if (lang === "eng_Latn") return _mosesDetokenizeEnglish(sent.split(" "));
+      const xlated = transliterate(sent, "hi", isoLang);
+      return trivialDetokenize(xlated, isoLang);
+    }
+
+    preprocessBatch(batch, { srcLang, tgtLang = null, isTarget = false } = {}) {
+      if (typeof batch === "string") batch = [batch];
+      return batch.map((s) => this._preprocess(s, srcLang, tgtLang, isTarget));
+    }
+
+    postprocessBatch(sents, { lang = "hin_Deva", numReturnSequences = 1 } = {}) {
+      if (typeof sents === "string") sents = [sents];
+      const numInputs = Math.floor(sents.length / numReturnSequences);
+      const maps = [];
+      for (let i = 0; i < numInputs; i++) maps.push(this._queue.shift() ?? {});
+      const out = [];
+      for (let i = 0; i < sents.length; i++) {
+        const mapIdx = Math.floor(i / numReturnSequences);
+        out.push(this._postprocess(sents[i], lang, maps[mapIdx] ?? {}));
+      }
+      this._queue = [];
+      return out;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // BPE Tokenizer
+  // ─────────────────────────────────────────────────────────────────────────
+
+  class BPETokenizer {
+    constructor(json) {
+      this.json = json;
+      const m = json.model;
+      if (m.type !== "BPE") throw new Error(`Expected BPE model, got ${m.type}`);
+      this.vocab = m.vocab;
+      this.idToToken = new Array(this._maxId() + 1);
+      for (const [tok, id] of Object.entries(this.vocab)) this.idToToken[id] = tok;
+      this.mergeRanks = new Map();
+      if (Array.isArray(m.merges)) {
+        m.merges.forEach((pair, idx) => {
+          const key = Array.isArray(pair) ? pair.join(" ") : pair;
+          this.mergeRanks.set(key, idx);
+        });
+      }
+      this.addedTokens = (json.added_tokens || []).slice()
+        .sort((a, b) => b.content.length - a.content.length);
+      this.addedTokenIds = new Set(this.addedTokens.map((t) => t.id));
+      this.specialIds = new Set(this.addedTokens.filter((t) => t.special).map((t) => t.id));
+      this.normalizer = json.normalizer;
+      this.preTokenizer = json.pre_tokenizer;
+      this.decoderSpec = json.decoder;
+      this.replacement = (this.preTokenizer && this.preTokenizer.replacement) || "▁";
+      this.postProcessor = json.post_processor;
+    }
+    _maxId() {
+      let max = 0;
+      for (const id of Object.values(this.vocab)) if (id > max) max = id;
+      for (const t of this.json.added_tokens || []) if (t.id > max) max = t.id;
+      return max;
+    }
+    encode(text) {
+      text = this._normalize(text);
+      const chunks = this._splitOnAddedTokens(text);
+      const ids = [];
+      for (const chunk of chunks) {
+        if (typeof chunk === "number") { ids.push(chunk); continue; }
+        let pre = chunk.replace(/ /g, this.replacement);
+        if (this.preTokenizer && this.preTokenizer.prepend_scheme === "always") {
+          if (!pre.startsWith(this.replacement)) pre = this.replacement + pre;
+        }
+        const words = this._splitWords(pre);
+        for (const word of words) for (const id of this._bpeEncode(word)) ids.push(id);
+      }
+      return this._applyPostProcessor(ids);
+    }
+    _normalize(text) {
+      if (!this.normalizer) return text;
+      const apply = (norm) => {
+        if (norm.type === "Sequence") {
+          for (const sub of norm.normalizers) text = apply(sub) || text;
+          return text;
+        }
+        if (norm.type === "NFKC") return text.normalize("NFKC");
+        if (norm.type === "Replace") {
+          const pat = norm.pattern.Regex || norm.pattern.String || "";
+          const flags = norm.pattern.Regex ? "g" : "";
+          return text.replace(new RegExp(pat, flags), norm.content);
+        }
+        return text;
+      };
+      return apply(this.normalizer);
+    }
+    _splitOnAddedTokens(text) {
+      if (!this.addedTokens.length) return [text];
+      const escaped = this.addedTokens.map((t) => t.content.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+      const re = new RegExp(`(${escaped.join("|")})`, "g");
+      const out = []; let pos = 0; let m;
+      while ((m = re.exec(text)) !== null) {
+        const tok = this.addedTokens.find((t) => t.content === m[1]);
+        let pre = text.slice(pos, m.index);
+        if (tok.lstrip) pre = pre.replace(/[ \t]+$/, "");
+        if (pre.length) out.push(pre);
+        out.push(tok.id);
+        pos = m.index + m[1].length;
+        if (tok.rstrip) {
+          while (pos < text.length && /[ \t]/.test(text[pos])) pos++;
+        }
+      }
+      if (pos < text.length) out.push(text.slice(pos));
+      return out;
+    }
+    _splitWords(metaspaced) {
+      const out = []; let cur = "";
+      for (const ch of metaspaced) {
+        if (ch === this.replacement) { if (cur) out.push(cur); cur = ch; }
+        else cur += ch;
+      }
+      if (cur) out.push(cur);
+      return out;
+    }
+    _bpeEncode(word) {
+      if (this.vocab.hasOwnProperty(word)) return [this.vocab[word]];
+      let parts = Array.from(word);
+      while (parts.length > 1) {
+        let bestRank = Infinity, bestIdx = -1;
+        for (let i = 0; i < parts.length - 1; i++) {
+          const key = parts[i] + " " + parts[i + 1];
+          const rank = this.mergeRanks.get(key);
+          if (rank !== undefined && rank < bestRank) { bestRank = rank; bestIdx = i; }
+        }
+        if (bestIdx < 0) break;
+        parts = [
+          ...parts.slice(0, bestIdx),
+          parts[bestIdx] + parts[bestIdx + 1],
+          ...parts.slice(bestIdx + 2),
+        ];
+      }
+      const unkId = this._unkId();
+      return parts.map((p) => (this.vocab.hasOwnProperty(p) ? this.vocab[p] : unkId));
+    }
+    _unkId() {
+      return (this.json.model && this.json.model.unk_token && this.vocab[this.json.model.unk_token]) ?? 3;
+    }
+    _applyPostProcessor(ids) {
+      if (!this.postProcessor) return ids;
+      if (this.postProcessor.type !== "TemplateProcessing") return ids;
+      const out = ids.slice();
+      for (const piece of this.postProcessor.single || []) {
+        if (piece.SpecialToken) {
+          const stId = piece.SpecialToken.id;
+          const found = (this.postProcessor.special_tokens && this.postProcessor.special_tokens[stId]);
+          if (found) out.push(found.ids[0]);
+        }
+      }
+      return out;
+    }
+    decode(ids, { skip_special_tokens = true } = {}) {
+      const tokens = [];
+      for (const id of ids) {
+        if (skip_special_tokens && this.specialIds.has(id)) continue;
+        const tok = this.idToToken[id];
+        if (tok !== undefined) tokens.push(tok);
+      }
+      let s = tokens.join("");
+      s = s.split(this.replacement).join(" ");
+      if (s.startsWith(" ")) s = s.slice(1);
+      return s;
+    }
+  }
+
+  class IT2Tokenizer {
+    constructor(srcJson, tgtJson, meta) {
+      this.src = new BPETokenizer(srcJson);
+      this.tgt = new BPETokenizer(tgtJson);
+      this.meta = meta;
+    }
+    encodeSrc(text) {
+      const ids = this.src.encode(text);
+      const dictSize = this.meta.src_dict_size;
+      const unk = this.meta.unk_id;
+      const safe = ids.map((i) => (i < dictSize ? i : unk));
+      return { input_ids: safe, attention_mask: new Array(safe.length).fill(1) };
+    }
+    decodeTgt(ids) {
+      const dictSize = this.meta.tgt_dict_size;
+      const unk = this.meta.unk_id;
+      const safe = ids.map((i) => (i < dictSize ? i : unk));
+      return this.tgt.decode(safe, { skip_special_tokens: true });
+    }
+  }
+
+  return { IndicProcessor, IT2Tokenizer, BPETokenizer };
+  })();
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CORE
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const __m_core_events = (() => {
+    const listeners = new Map();
+    function on(evt, fn) {
+      if (!listeners.has(evt)) listeners.set(evt, new Set());
+      listeners.get(evt).add(fn);
+      return () => off(evt, fn);
+    }
+    function off(evt, fn) {
+      listeners.get(evt)?.delete(fn);
+    }
+    function emit(evt, data) {
+      const set = listeners.get(evt);
+      if (!set) return;
+      for (const fn of set) {
+        try { fn(data); } catch (e) { console.error('[event handler]', evt, e); }
+      }
+    }
+    return { on, off, emit };
+  })();
+
+  const __m_core_state = (() => {
+    const state = {
+      rootHandle: null,        // FileSystemDirectoryHandle | null
+      rootName: '',            // display name of picked folder
+      permission: 'unavailable', // 'granted' | 'prompt' | 'denied' | 'unavailable'
+      projects: [],            // mirror — array of Project
+      currentProjectId: null,  // active project in editor screen
+      route: null              // current hash
+    };
+    function set(patch) {
+      Object.assign(state, patch);
+      __m_core_events.emit('state:changed', state);
+    }
+    return { state, set };
+  })();
+
+  const __m_core_idb = (() => {
+    const DB_NAME = 'ghoshana.v1';
+    const DB_VER  = 1;
+    const STORES  = ['meta', 'projects'];
+
+    let _db = null;
+
+    function getDb() {
+      if (_db) return Promise.resolve(_db);
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, DB_VER);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          for (const s of STORES) {
+            if (!db.objectStoreNames.contains(s)) db.createObjectStore(s);
+          }
+        };
+        req.onsuccess = () => { _db = req.result; resolve(_db); };
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function init() { await getDb(); }
+
+    async function get(store, key) {
+      try {
+        const db = await getDb();
+        return await new Promise((res) => {
+          const tx = db.transaction(store, 'readonly');
+          const req = tx.objectStore(store).get(key);
+          req.onsuccess = () => res(req.result ?? null);
+          req.onerror = () => res(null);
+        });
+      } catch { return null; }
+    }
+
+    async function put(store, key, value) {
+      try {
+        const db = await getDb();
+        await new Promise((res, rej) => {
+          const tx = db.transaction(store, 'readwrite');
+          tx.objectStore(store).put(value, key);
+          tx.oncomplete = res;
+          tx.onerror = rej;
+        });
+      } catch (e) {
+        // Firefox throws on FSA handle structured-clone; swallow per CONV.md.
+        console.warn('[idb] put failed', store, key, e);
+      }
+    }
+
+    async function del(store, key) {
+      try {
+        const db = await getDb();
+        await new Promise((res) => {
+          const tx = db.transaction(store, 'readwrite');
+          tx.objectStore(store).delete(key);
+          tx.oncomplete = res;
+          tx.onerror = res;
+        });
+      } catch {}
+    }
+
+    async function getAll(store) {
+      try {
+        const db = await getDb();
+        return await new Promise((res) => {
+          const tx = db.transaction(store, 'readonly');
+          const req = tx.objectStore(store).getAll();
+          req.onsuccess = () => res(req.result ?? []);
+          req.onerror = () => res([]);
+        });
+      } catch { return []; }
+    }
+
+    async function clear(store) {
+      try {
+        const db = await getDb();
+        await new Promise((res) => {
+          const tx = db.transaction(store, 'readwrite');
+          tx.objectStore(store).clear();
+          tx.oncomplete = res;
+          tx.onerror = res;
+        });
+      } catch {}
+    }
+
+    return { init, get, put, del, getAll, clear };
+  })();
+
+  const __m_core_id = (() => {
+    function nowISO() { return new Date().toISOString(); }
+    function shortHex(n) {
+      // n hex chars from crypto.getRandomValues (matches Python uuid4().hex[:n])
+      const bytes = new Uint8Array(Math.ceil(n / 2));
+      crypto.getRandomValues(bytes);
+      return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('').slice(0, n);
+    }
+    function slugify(name) {
+      const s = (name || '').toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+      return (s.slice(0, 40) || 'project').replace(/-+$/g, '');
+    }
+    function genProjectId(name) {
+      return `${slugify(name)}-${shortHex(6)}`;
+    }
+    function genSegmentId() {
+      return `seg_${shortHex(10)}`;
+    }
+    return { nowISO, shortHex, slugify, genProjectId, genSegmentId };
+  })();
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // DATA MODEL
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const __m_data_lang = (() => {
+    // Port of /Users/chiragpatnaik/Code/prashnam-voice/prashnam_voice/config.py:27-77.
+    // {code, name, flores, voice} — voices are placeholders until Layer 2 wires TTS.
+    const LANGUAGES = {
+      en:  { code:'en',  name:'English',   flores:'eng_Latn', voice:'Mary'   },
+      hi:  { code:'hi',  name:'Hindi',     flores:'hin_Deva', voice:'Divya'  },
+      ta:  { code:'ta',  name:'Tamil',     flores:'tam_Taml', voice:'Jaya'   },
+      te:  { code:'te',  name:'Telugu',    flores:'tel_Telu', voice:'Prakash'},
+      bn:  { code:'bn',  name:'Bengali',   flores:'ben_Beng', voice:'Arjun'  },
+      mr:  { code:'mr',  name:'Marathi',   flores:'mar_Deva', voice:'Sanjay' },
+      kn:  { code:'kn',  name:'Kannada',   flores:'kan_Knda', voice:'Suresh' },
+      gu:  { code:'gu',  name:'Gujarati',  flores:'guj_Gujr', voice:'Yash'   },
+      ml:  { code:'ml',  name:'Malayalam', flores:'mal_Mlym', voice:'Anjali' },
+      or:  { code:'or',  name:'Odia',      flores:'ory_Orya', voice:'Manas'  },
+      pa:  { code:'pa',  name:'Punjabi',   flores:'pan_Guru', voice:'Divjot' },
+      as:  { code:'as',  name:'Assamese',  flores:'asm_Beng', voice:'Amit'   },
+      ur:  { code:'ur',  name:'Urdu',      flores:'urd_Arab', voice:'Aman'   },
+      ne:  { code:'ne',  name:'Nepali',    flores:'npi_Deva', voice:'Amrita' },
+      sa:  { code:'sa',  name:'Sanskrit',  flores:'san_Deva', voice:'Aryan'  },
+      mai: { code:'mai', name:'Maithili',  flores:'mai_Deva', voice:'Aman'   },
+      ks:  { code:'ks',  name:'Kashmiri',  flores:'kas_Arab', voice:'Aman'   },
+      sd:  { code:'sd',  name:'Sindhi',    flores:'snd_Deva', voice:'Aman'   },
+      brx: { code:'brx', name:'Bodo',      flores:'brx_Deva', voice:'Bikram' },
+      doi: { code:'doi', name:'Dogri',     flores:'doi_Deva', voice:'Karan'  },
+      kok: { code:'kok', name:'Konkani',   flores:'gom_Deva', voice:'Sanjay' },
+      mni: { code:'mni', name:'Manipuri',  flores:'mni_Beng', voice:'Laishram'},
+      sat: { code:'sat', name:'Santali',   flores:'sat_Olck', voice:'Manas'  },
+    };
+    const ALL_LANG_CODES = Object.keys(LANGUAGES);
+
+    const PACES = {
+      very_slow: 'speaks very slowly',
+      slow:      'speaks slowly',
+      moderate:  'speaks at a moderate pace',
+      fast:      'speaks quickly',
+      very_fast: 'speaks very quickly',
+    };
+    const DEFAULT_PACE = 'moderate';
+    const DEFAULT_PROJECT_LANGS = ['en', 'hi'];
+
+    return { LANGUAGES, ALL_LANG_CODES, PACES, DEFAULT_PACE, DEFAULT_PROJECT_LANGS };
+  })();
+
+  const __m_data_domain = (() => {
+    // Port of /Users/chiragpatnaik/Code/prashnam-voice/prashnam_voice/domains.py.
+    const POLL_QUESTION_TEMPLATE =
+      'Namaskar, this is a call from Prashnam, an independent polling agency. {body}';
+    const POLL_OPTION_TEMPLATE = 'If you think {body}, then press {n}.';
+
+    const DOMAINS = {
+      poll: {
+        name: 'poll',
+        label: 'Poll',
+        description: '1 question + N options. Each option carries an index used by IVR.',
+        segment_types: [
+          { name: 'question', label: 'Question', addable: false, deletable: false, max: 1, template_field: 'question_template' },
+          { name: 'option',   label: 'Option',   addable: true,  deletable: true,            template_field: 'option_template' }
+        ],
+        default_templates: {
+          question_template: POLL_QUESTION_TEMPLATE,
+          option_template:   POLL_OPTION_TEMPLATE
+        }
+      },
+      announcement: {
+        name: 'announcement',
+        label: 'Announcement',
+        description: 'Flat list of body segments. PSAs, store announcements, robocall scripts.',
+        segment_types: [
+          { name: 'body', label: 'Body', addable: true, deletable: true, template_field: null }
+        ],
+        default_templates: { question_template: '', option_template: '' }
+      },
+      ivr: {
+        name: 'ivr',
+        label: 'IVR menu',
+        description: 'Branching DTMF menu — prompts, menus, responses, bridges, terminators.',
+        segment_types: [
+          { name: 'prompt',     label: 'Prompt',     addable: true, deletable: true, template_field: null },
+          { name: 'menu',       label: 'Menu',       addable: true, deletable: true, template_field: null },
+          { name: 'response',   label: 'Response',   addable: true, deletable: true, template_field: null },
+          { name: 'bridge',     label: 'Bridge',     addable: true, deletable: true, template_field: null },
+          { name: 'terminator', label: 'Terminator', addable: true, deletable: true, template_field: null }
+        ],
+        default_templates: { question_template: '', option_template: '' }
+      }
+    };
+    const DEFAULT_DOMAIN = 'poll';
+    const ALL_DOMAINS = Object.keys(DOMAINS);
+
+    function get(name) { return DOMAINS[name] || null; }
+    return { DOMAINS, DEFAULT_DOMAIN, ALL_DOMAINS, get };
+  })();
+
+  const __m_data_project = (() => {
+    // Port of /Users/chiragpatnaik/Code/prashnam-voice/prashnam_voice/projects.py:98-230 + create() at 558.
+    const SCHEMA_VERSION = 1;
+    const CANONICAL_ROTATION = 'r0';
+
+    const DEFAULT_QUESTION_TEMPLATE =
+      'Namaskar, this is a call from Prashnam, an independent polling agency. {body}';
+    const DEFAULT_OPTION_TEMPLATE = 'If you think {body}, then press {n}.';
+
+    function createProject({ name, domain, langs }) {
+      name = (name || '').trim() || 'Untitled';
+      domain = domain || __m_data_domain.DEFAULT_DOMAIN;
+      const pack = __m_data_domain.get(domain);
+      if (!pack) throw new Error(`unknown domain: ${domain}`);
+
+      const validLangs = (langs && langs.length) ? langs : __m_data_lang.DEFAULT_PROJECT_LANGS;
+      const codes = validLangs.filter(c => __m_data_lang.LANGUAGES[c]);
+      if (!codes.length) codes.push(...__m_data_lang.DEFAULT_PROJECT_LANGS);
+
+      const id = __m_core_id.genProjectId(name);
+      const now = __m_core_id.nowISO();
+      const t = pack.default_templates || {};
+
+      return {
+        id,
+        name,
+        created_at: now,
+        updated_at: now,
+        schema_version: SCHEMA_VERSION,
+        domain,
+        langs: codes,
+        default_pace: __m_data_lang.DEFAULT_PACE,
+        voices: {},
+        paces: {},
+        question_template: t.question_template ?? DEFAULT_QUESTION_TEMPLATE,
+        option_template:   t.option_template   ?? DEFAULT_OPTION_TEMPLATE,
+        body_template:     t.body_template     ?? '',
+        start_segment_id: '',
+        rotation_count: 1,
+        rotation_seed: null,
+        rotations: [],
+        // lexicon: { global: {key: replacement}, en: {...}, hi: {...} } per Python projects.py docstring at line 192
+        lexicon: { global: {} },
+        segments: []
+      };
+    }
+
+    function createSegment({ type, english }) {
+      return {
+        id: __m_core_id.genSegmentId(),
+        type,
+        english: english || '',
+        use_template: true,
+        lock_at_end: false,
+        edges: {},
+        x: 0, y: 0,
+        voices: {},
+        paces: {},
+        translations: {},
+        current_takes: {}
+      };
+    }
+
+    function serialize(project) {
+      return JSON.stringify(project, null, 2);
+    }
+
+    function migrate(project) {
+      // Idempotent. Adds schema_version if missing; future-shape migrations
+      // land here. Per CONV.md "ISO 8601 + idempotent load-time migration"
+      // pattern — runs every load, doesn't gate on a one-shot flag.
+      if (!project.schema_version) project.schema_version = SCHEMA_VERSION;
+      if (!project.lexicon || typeof project.lexicon !== 'object') project.lexicon = { global: {} };
+      if (!project.lexicon.global) project.lexicon.global = {};
+      if (!Array.isArray(project.segments)) project.segments = [];
+      if (!Array.isArray(project.langs)) project.langs = [];
+      if (!Array.isArray(project.rotations)) project.rotations = [];
+      project.voices = project.voices || {};
+      project.paces  = project.paces  || {};
+      return project;
+    }
+
+    function deserialize(json) {
+      const p = typeof json === 'string' ? JSON.parse(json) : json;
+      return migrate(p);
+    }
+
+    function touch(project) {
+      project.updated_at = __m_core_id.nowISO();
+      return project;
+    }
+
+    return {
+      SCHEMA_VERSION,
+      CANONICAL_ROTATION,
+      createProject,
+      createSegment,
+      serialize,
+      deserialize,
+      migrate,
+      touch
+    };
+  })();
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // FILE SYSTEM ACCESS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const __m_core_fs = (() => {
+    // Lifted/adapted from /Users/chiragpatnaik/Code/Browser/Slate/index.html:2812-3126.
+    const hasFSA = 'showOpenFilePicker' in window;
+    const hasDirPicker = 'showDirectoryPicker' in window;
+
+    async function pickRoot() {
+      if (!hasDirPicker) throw new Error('Directory picker unavailable');
+      // mode:'readwrite' upfront — saves a second prompt on first save (CONV.md line 231).
+      const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+      return handle;
+    }
+
+    async function ensurePermission(handle, mode = 'readwrite') {
+      // Mirrors Slate's openFromHandle escalation (lines 3018-3031).
+      const perm = await handle.queryPermission({ mode });
+      if (perm === 'granted') return 'granted';
+      const req = await handle.requestPermission({ mode });
+      return req;
+    }
+
+    async function readProjectJson(rootHandle, projectId) {
+      try {
+        const dir = await rootHandle.getDirectoryHandle(projectId);
+        const file = await dir.getFileHandle('project.json');
+        const blob = await file.getFile();
+        const text = await blob.text();
+        return __m_data_project.deserialize(text);
+      } catch (err) {
+        if (err.name === 'NotFoundError') return null;
+        throw err;
+      }
+    }
+
+    async function writeProjectJson(rootHandle, project) {
+      // createWritable + close gives implementation-level atomicity in Chromium
+      // (CONV.md line 122 — Chromium opens a temp file and atomically swaps).
+      const dir = await rootHandle.getDirectoryHandle(project.id, { create: true });
+      const file = await dir.getFileHandle('project.json', { create: true });
+      const writable = await file.createWritable();
+      await writable.write(__m_data_project.serialize(project));
+      await writable.close();
+    }
+
+    async function deleteProject(rootHandle, projectId) {
+      await rootHandle.removeEntry(projectId, { recursive: true });
+    }
+
+    async function listProjectIds(rootHandle) {
+      const ids = [];
+      for await (const [name, entry] of rootHandle.entries()) {
+        if (name.startsWith('.')) continue;
+        if (entry.kind !== 'directory') continue;
+        try {
+          await entry.getFileHandle('project.json');
+          ids.push(name);
+        } catch {
+          // Not a Ghoshana project folder — skip silently.
+        }
+      }
+      ids.sort();
+      return ids;
+    }
+
+    return {
+      hasFSA, hasDirPicker,
+      pickRoot, ensurePermission,
+      readProjectJson, writeProjectJson, deleteProject, listProjectIds
+    };
+  })();
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // STORAGE
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const __m_storage_projects = (() => {
+    // FS-primary, IDB-mirror project I/O (CONV.md "Storage façade" pattern, line 90).
+
+    async function loadAll() {
+      const { rootHandle } = __m_core_state.state;
+      let fromFs = [];
+      let fromIdb = await __m_core_idb.getAll('projects');
+
+      if (rootHandle) {
+        try {
+          const ids = await __m_core_fs.listProjectIds(rootHandle);
+          for (const id of ids) {
+            const p = await __m_core_fs.readProjectJson(rootHandle, id);
+            if (p) {
+              fromFs.push(p);
+              await __m_core_idb.put('projects', p.id, p);
+            }
+          }
+          // Cull IDB mirror entries that no longer exist on disk.
+          const liveIds = new Set(fromFs.map(p => p.id));
+          for (const m of fromIdb) {
+            if (m && m.id && !liveIds.has(m.id)) {
+              await __m_core_idb.del('projects', m.id);
+            }
+          }
+          return fromFs;
+        } catch (err) {
+          console.warn('[storage] FS load failed, falling back to IDB mirror', err);
+        }
+      }
+      return fromIdb.filter(Boolean);
+    }
+
+    async function save(project) {
+      __m_data_project.touch(project);
+      const { rootHandle, permission } = __m_core_state.state;
+      if (rootHandle && permission !== 'granted') {
+        // Reconnect required before writes can land on disk. Don't write to
+        // IDB-only — that would diverge from disk and get clobbered on the
+        // next reconnect (which re-reads FS into IDB).
+        throw new Error('Reconnect folder before saving.');
+      }
+      if (rootHandle) {
+        await __m_core_fs.writeProjectJson(rootHandle, project);
+      }
+      await __m_core_idb.put('projects', project.id, project);
+    }
+
+    async function remove(projectId) {
+      if (__m_core_state.state.rootHandle) {
+        try {
+          await __m_core_fs.deleteProject(__m_core_state.state.rootHandle, projectId);
+        } catch (err) {
+          console.warn('[storage] FS delete failed', err);
+        }
+      }
+      await __m_core_idb.del('projects', projectId);
+    }
+
+    function findById(id) {
+      return __m_core_state.state.projects.find(p => p.id === id) || null;
+    }
+
+    return { loadAll, save, remove, findById };
+  })();
+
+  const __m_storage_session = (() => {
+    // Boot-time dirHandle restore — Slate __m_core_session pattern (Slate index.html:8611-8663).
+
+    async function checkAndRestore() {
+      const handle = await __m_core_idb.get('meta', 'rootHandle');
+      if (!handle) {
+        __m_core_state.set({ permission: __m_core_fs.hasDirPicker ? 'prompt' : 'unavailable' });
+        return;
+      }
+      try {
+        const perm = await handle.queryPermission({ mode: 'readwrite' });
+        if (perm === 'granted') {
+          await attach(handle, 'silent');
+        } else {
+          // 'prompt' or 'denied' — keep the handle staged but don't auto-prompt
+          // (would need a user gesture). The reconnect pill shows up.
+          __m_core_state.set({
+            rootHandle: handle,
+            rootName: handle.name,
+            permission: 'prompt',
+            projects: await loadIdbMirror()
+          });
+        }
+      } catch (err) {
+        console.warn('[session] handle restore failed', err);
+        await __m_core_idb.del('meta', 'rootHandle');
+        __m_core_state.set({ permission: __m_core_fs.hasDirPicker ? 'prompt' : 'unavailable' });
+      }
+    }
+
+    async function loadIdbMirror() {
+      const arr = await __m_core_idb.getAll('projects');
+      return arr.filter(Boolean);
+    }
+
+    async function attach(handle, mode) {
+      // Re-confirm permission (no-op if already 'granted').
+      const perm = await __m_core_fs.ensurePermission(handle, 'readwrite');
+      if (perm !== 'granted') {
+        __m_ui_toast.show('Folder access denied. Pick a folder to continue.', 'warn');
+        await detach();
+        return false;
+      }
+      __m_core_state.set({
+        rootHandle: handle,
+        rootName: handle.name,
+        permission: 'granted'
+      });
+      await __m_core_idb.put('meta', 'rootHandle', handle);
+      const projects = await __m_storage_projects.loadAll();
+      __m_core_state.set({ projects });
+      __m_core_events.emit('session:attached', { mode });
+      return true;
+    }
+
+    async function reconnect() {
+      const handle = __m_core_state.state.rootHandle;
+      if (!handle) return false;
+      return attach(handle, 'reconnect');
+    }
+
+    async function pickAndAttach() {
+      try {
+        const handle = await __m_core_fs.pickRoot();
+        return await attach(handle, 'pick');
+      } catch (err) {
+        if (err.name === 'AbortError') return false;
+        __m_ui_toast.show(`Could not pick folder: ${err.message}`, 'err');
+        return false;
+      }
+    }
+
+    async function detach() {
+      __m_core_state.set({
+        rootHandle: null,
+        rootName: '',
+        permission: __m_core_fs.hasDirPicker ? 'prompt' : 'unavailable'
+        // keep projects mirror in IDB so they're visible on re-attach
+      });
+      await __m_core_idb.del('meta', 'rootHandle');
+      __m_core_events.emit('session:detached', null);
+    }
+
+    return { checkAndRestore, attach, reconnect, pickAndAttach, detach };
+  })();
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PIPELINE — model cache, lazy loader, greedy translate, lexicon
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const __m_pipeline_lexicon = (() => {
+    // JS port of /Users/chiragpatnaik/Code/prashnam-voice/browser-prep/js/lexicon.js.
+    // Whole-word substitution, longest-keys-first, per-language overrides over global.
+    function applyLexicon(text, lexicon, lang = null) {
+      if (!lexicon) return text;
+      const merged = Object.assign({}, lexicon.global || {}, lang ? (lexicon[lang] || {}) : {});
+      const keys = Object.keys(merged);
+      if (!keys.length) return text;
+      keys.sort((a, b) => b.length - a.length);
+      for (const key of keys) {
+        if (!key) continue;
+        const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const re = new RegExp(`(?<!\\w)${escaped}(?!\\w)`, "g");
+        text = text.replace(re, merged[key]);
+      }
+      return text;
+    }
+    return { applyLexicon };
+  })();
+
+  const __m_pipeline_cache = (() => {
+    // IDB-cached fetch with progress (lifted from Anuvaad index.html:1308-1378).
+    // Separate DB so it survives a Ghoshana state wipe — the model bundle is 1.3GB.
+    const IDB_NAME = 'ghoshana-model-cache';
+    const IDB_STORE = 'files';
+
+    function open() {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open(IDB_NAME, 1);
+        req.onupgradeneeded = (e) => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains(IDB_STORE)) {
+            db.createObjectStore(IDB_STORE, { keyPath: 'url' });
+          }
+        };
+        req.onsuccess = (e) => resolve(e.target.result);
+        req.onerror = (e) => reject(e.target.error);
+      });
+    }
+
+    async function _get(db, url) {
+      return new Promise((resolve) => {
+        const tx = db.transaction(IDB_STORE, 'readonly');
+        const req = tx.objectStore(IDB_STORE).get(url);
+        req.onsuccess = (e) => resolve(e.target.result || null);
+        req.onerror = () => resolve(null);
+      });
+    }
+
+    async function _put(db, url, blob) {
+      return new Promise((resolve) => {
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        const req = tx.objectStore(IDB_STORE).put({ url, blob });
+        req.onsuccess = () => resolve();
+        req.onerror = () => resolve();
+      });
+    }
+
+    async function fetchWithProgress(url, onProgress) {
+      let db = null;
+      try { db = await open(); } catch {}
+      if (db) {
+        const row = await _get(db, url);
+        if (row && row.blob) {
+          onProgress(1.0);
+          return new Uint8Array(await row.blob.arrayBuffer());
+        }
+      }
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`HTTP ${r.status} fetching ${url}`);
+      const total = +r.headers.get('Content-Length') || 0;
+      const reader = r.body.getReader();
+      const chunks = []; let received = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.length;
+        if (total) onProgress(received / total);
+      }
+      const buf = new Uint8Array(received);
+      let off = 0;
+      for (const c of chunks) { buf.set(c, off); off += c.length; }
+      if (db) {
+        try { await _put(db, url, new Blob([buf])); } catch {}
+      }
+      return buf;
+    }
+
+    return { fetchWithProgress };
+  })();
+
+  const __m_pipeline_model = (() => {
+    // Lazy ModelManager — loads on first translate, caches sessions for reuse.
+    const HF_REPO = 'naklitechie/indictrans2-en-indic-dist-200M-ONNX';
+    const BASE = `https://huggingface.co/${HF_REPO}/resolve/main`;
+
+    const FILES = [
+      { name: 'encoder_model.onnx',                mb: 2 },
+      { name: 'encoder_model.onnx.data',           mb: 280 },
+      { name: 'decoder_model.onnx',                mb: 4 },
+      { name: 'decoder_model.onnx.data',           mb: 530 },
+      { name: 'decoder_with_past_model.onnx',      mb: 3 },
+      { name: 'decoder_with_past_model.onnx.data', mb: 495 },
+      { name: 'tokenizer_src.json',                mb: 4 },
+      { name: 'tokenizer_tgt.json',                mb: 17 },
+      { name: 'tokenizer_meta.json',               mb: 0 },
+    ];
+    const TOTAL_MB = FILES.reduce((s, f) => s + f.mb, 0);
+
+    let _ip = null, _tok = null;
+    let _encSess = null, _decSess = null, _decpSess = null;
+    let _ready = false;
+    let _loading = null; // Promise
+
+    function isReady() { return _ready; }
+    function isLoading() { return !!_loading; }
+
+    async function ensureLoaded(onProgress = () => {}) {
+      if (_ready) return;
+      if (_loading) return _loading;
+      _loading = _doLoad(onProgress)
+        .then(() => { _loading = null; })
+        .catch((e) => { _loading = null; throw e; });
+      return _loading;
+    }
+
+    async function _doLoad(onProgress) {
+      if (typeof ort === 'undefined') {
+        throw new Error('ONNX Runtime Web (ort) is not loaded. Check your network.');
+      }
+      ort.env.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency || 1);
+      ort.env.wasm.simd = true;
+
+      const buffers = {};
+      let downloadedMb = 0;
+      for (const f of FILES) {
+        onProgress({ phase: 'downloading', file: f.name, pct: downloadedMb / TOTAL_MB });
+        const buf = await __m_pipeline_cache.fetchWithProgress(`${BASE}/${f.name}`, (frac) => {
+          const cur = downloadedMb + frac * f.mb;
+          onProgress({ phase: 'downloading', file: f.name, pct: cur / TOTAL_MB });
+        });
+        buffers[f.name] = buf;
+        downloadedMb += f.mb;
+      }
+
+      const dec = new TextDecoder();
+      const srcJson = JSON.parse(dec.decode(buffers['tokenizer_src.json']));
+      const tgtJson = JSON.parse(dec.decode(buffers['tokenizer_tgt.json']));
+      const metaJson = JSON.parse(dec.decode(buffers['tokenizer_meta.json']));
+      _tok = new __m_pipeline_classes.IT2Tokenizer(srcJson, tgtJson, metaJson);
+      _ip = new __m_pipeline_classes.IndicProcessor({ inference: true });
+
+      onProgress({ phase: 'init', file: 'encoder', pct: 0.97 });
+      _encSess = await ort.InferenceSession.create(buffers['encoder_model.onnx'], {
+        externalData: [{ data: buffers['encoder_model.onnx.data'], path: 'encoder_model.onnx.data' }],
+        executionProviders: ['wasm'],
+      });
+      onProgress({ phase: 'init', file: 'decoder', pct: 0.98 });
+      _decSess = await ort.InferenceSession.create(buffers['decoder_model.onnx'], {
+        externalData: [{ data: buffers['decoder_model.onnx.data'], path: 'decoder_model.onnx.data' }],
+        executionProviders: ['wasm'],
+      });
+      onProgress({ phase: 'init', file: 'decoder-with-past', pct: 0.99 });
+      _decpSess = await ort.InferenceSession.create(buffers['decoder_with_past_model.onnx'], {
+        externalData: [{ data: buffers['decoder_with_past_model.onnx.data'], path: 'decoder_with_past_model.onnx.data' }],
+        executionProviders: ['wasm'],
+      });
+
+      _ready = true;
+      onProgress({ phase: 'ready', file: null, pct: 1.0 });
+    }
+
+    function get() {
+      if (!_ready) throw new Error('Model not loaded');
+      return { ip: _ip, tok: _tok, encSess: _encSess, decSess: _decSess, decpSess: _decpSess };
+    }
+
+    return { ensureLoaded, isReady, isLoading, get };
+  })();
+
+  const __m_pipeline_translate = (() => {
+    // Greedy decode loop — Anuvaad index.html:1448-1525.
+    const NUM_LAYERS = 18;
+    const KV_KINDS = ['decoder.key', 'decoder.value', 'encoder.key', 'encoder.value'];
+    const DECODER_START_ID = 2;
+    const EOS_ID = 2;
+    const MAX_NEW_TOKENS = 128;
+
+    function _greedyArgmax(data, dims) {
+      const [B, T, V] = dims;
+      const lastOff = (B - 1) * T * V + (T - 1) * V;
+      let best = -Infinity, bestIdx = 0;
+      for (let i = 0; i < V; i++) {
+        const v = data[lastOff + i];
+        if (v > best) { best = v; bestIdx = i; }
+      }
+      return bestIdx;
+    }
+
+    function _collectPresents(out, prefix) {
+      const arr = new Array(NUM_LAYERS * 4);
+      for (let i = 0; i < NUM_LAYERS; i++) {
+        for (let j = 0; j < KV_KINDS.length; j++) {
+          arr[i * 4 + j] = out[`${prefix}.${i}.${KV_KINDS[j]}`];
+        }
+      }
+      return arr;
+    }
+
+    async function translate(srcText, tgtFlores, { signal } = {}) {
+      const { ip, tok, encSess, decSess, decpSess } = __m_pipeline_model.get();
+      ip.resetQueue();
+      const [pre] = ip.preprocessBatch(srcText, { srcLang: 'eng_Latn', tgtLang: tgtFlores });
+      const { input_ids, attention_mask } = tok.encodeSrc(pre);
+      const B = 1, S = input_ids.length;
+
+      if (signal && signal.aborted) throw new Error('aborted');
+
+      const encInputIds = new ort.Tensor('int64', BigInt64Array.from(input_ids.map(BigInt)), [B, S]);
+      const encAttnMask = new ort.Tensor('int64', BigInt64Array.from(attention_mask.map(BigInt)), [B, S]);
+
+      const encOut = await encSess.run({ input_ids: encInputIds, attention_mask: encAttnMask });
+      const encH = encOut.last_hidden_state;
+
+      if (signal && signal.aborted) throw new Error('aborted');
+
+      const outTokens = [DECODER_START_ID];
+      let curId = BigInt64Array.from([BigInt(DECODER_START_ID)]);
+      let feed = {
+        input_ids: new ort.Tensor('int64', curId, [1, 1]),
+        encoder_attention_mask: encAttnMask,
+        encoder_hidden_states: encH,
+      };
+      let stepOut = await decSess.run(feed);
+      let logits = stepOut.logits;
+      let nextId = _greedyArgmax(logits.data, logits.dims);
+      outTokens.push(nextId);
+
+      let presents = _collectPresents(stepOut, 'present');
+      while (nextId !== EOS_ID && outTokens.length < MAX_NEW_TOKENS + 1) {
+        if (signal && signal.aborted) throw new Error('aborted');
+        const stepFeed = {
+          input_ids: new ort.Tensor('int64', BigInt64Array.from([BigInt(nextId)]), [1, 1]),
+          encoder_attention_mask: encAttnMask,
+        };
+        for (let i = 0; i < NUM_LAYERS; i++) {
+          for (let j = 0; j < KV_KINDS.length; j++) {
+            stepFeed[`past_key_values.${i}.${KV_KINDS[j]}`] = presents[i * 4 + j];
+          }
+        }
+        stepOut = await decpSess.run(stepFeed);
+        logits = stepOut.logits;
+        nextId = _greedyArgmax(logits.data, logits.dims);
+        outTokens.push(nextId);
+        presents = _collectPresents(stepOut, 'present');
+        if (outTokens.length % 8 === 0) await new Promise((r) => setTimeout(r, 0));
+      }
+
+      const rawText = tok.decodeTgt(outTokens);
+      const [final] = ip.postprocessBatch(rawText, { lang: tgtFlores });
+      return { final, raw: rawText, tokens: outTokens.length };
+    }
+
+    return { translate };
+  })();
+
+  const __m_pipeline_queue = (() => {
+    // Per-(seg,lang) translation queue with debounced enqueue + cancellation.
+    // Keys: `${segId}::${lang}`. Status: 'pending' | 'translating' | 'ready' | 'error' | 'stale'.
+    const queue = []; // [{ segId, lang, srcText, projectId }]
+    const inflight = new Map(); // key → AbortController
+    const status = new Map(); // key → { status, error?, lastSrc, result? }
+    let running = false;
+
+    function key(segId, lang) { return `${segId}::${lang}`; }
+
+    function getStatus(segId, lang) {
+      return status.get(key(segId, lang)) || { status: 'empty' };
+    }
+
+    function setStatus(segId, lang, patch) {
+      const k = key(segId, lang);
+      const prev = status.get(k) || {};
+      const next = { ...prev, ...patch };
+      status.set(k, next);
+      __m_core_events.emit('translate:status', { segId, lang, status: next });
+    }
+
+    function enqueue({ segId, lang, srcText, projectId }) {
+      const k = key(segId, lang);
+      // Cancel an in-flight job for the same key (English changed).
+      const ac = inflight.get(k);
+      if (ac) ac.abort();
+      // Drop pending entries for the same key.
+      for (let i = queue.length - 1; i >= 0; i--) {
+        if (key(queue[i].segId, queue[i].lang) === k) queue.splice(i, 1);
+      }
+      // Empty input: clear status, don't enqueue.
+      if (!srcText.trim()) {
+        status.delete(k);
+        __m_core_events.emit('translate:status', { segId, lang, status: { status: 'empty' } });
+        return;
+      }
+      setStatus(segId, lang, { status: 'pending', lastSrc: srcText });
+      queue.push({ segId, lang, srcText, projectId });
+      _drain();
+    }
+
+    function cancelForSegment(segId) {
+      for (const [k, ac] of inflight) {
+        if (k.startsWith(segId + '::')) ac.abort();
+      }
+      for (let i = queue.length - 1; i >= 0; i--) {
+        if (queue[i].segId === segId) queue.splice(i, 1);
+      }
+    }
+
+    async function _drain() {
+      if (running) return;
+      running = true;
+      try {
+        while (queue.length) {
+          const job = queue.shift();
+          await _runOne(job);
+        }
+      } finally {
+        running = false;
+      }
+    }
+
+    async function _runOne(job) {
+      const { segId, lang, srcText, projectId } = job;
+      const k = key(segId, lang);
+      const ac = new AbortController();
+      inflight.set(k, ac);
+      setStatus(segId, lang, { status: 'translating', lastSrc: srcText });
+
+      try {
+        if (!__m_pipeline_model.isReady()) {
+          await __m_pipeline_model.ensureLoaded((p) => {
+            __m_core_events.emit('model:progress', p);
+          });
+        }
+        const flores = __m_data_lang.LANGUAGES[lang]?.flores;
+        if (!flores) throw new Error(`unknown lang: ${lang}`);
+
+        // Apply lexicon (global + per-flores) before translating.
+        const proj = __m_storage_projects.findById(projectId);
+        const withLex = proj
+          ? __m_pipeline_lexicon.applyLexicon(srcText, proj.lexicon, flores)
+          : srcText;
+
+        const { final } = await __m_pipeline_translate.translate(withLex, flores, { signal: ac.signal });
+
+        // Persist into the project segment.translations[lang][r0].
+        if (proj) {
+          const seg = proj.segments.find((s) => s.id === segId);
+          if (seg) {
+            seg.translations = seg.translations || {};
+            seg.translations[lang] = seg.translations[lang] || {};
+            seg.translations[lang][__m_data_project.CANONICAL_ROTATION] = final;
+            try {
+              await __m_storage_projects.save(proj);
+            } catch (e) {
+              console.warn('[queue] save failed', e);
+            }
+          }
+        }
+
+        setStatus(segId, lang, { status: 'ready', result: final, error: null });
+      } catch (err) {
+        if (err && (err.message === 'aborted' || err.name === 'AbortError')) {
+          // Keep the previous status; the new English will trigger its own enqueue.
+          return;
+        }
+        console.error('[queue] translate failed', segId, lang, err);
+        setStatus(segId, lang, { status: 'error', error: err.message || 'failed' });
+      } finally {
+        inflight.delete(k);
+      }
+    }
+
+    return { enqueue, cancelForSegment, getStatus };
+  })();
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // UI — primitives
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const $  = (s, root = document) => root.querySelector(s);
+  const $$ = (s, root = document) => Array.from(root.querySelectorAll(s));
+
+  const __m_core_html = (() => {
+    const MAP = { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' };
+    function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => MAP[c]); }
+    return { esc };
+  })();
+
+  const __m_ui_toast = (() => {
+    const stack = $('#toast-stack');
+    function show(message, level = 'ok', ms = 2400) {
+      const el = document.createElement('div');
+      el.className = `toast ${level}`;
+      el.textContent = message;
+      stack.appendChild(el);
+      setTimeout(() => {
+        el.style.opacity = '0';
+        el.style.transition = 'opacity 0.2s';
+        setTimeout(() => el.remove(), 220);
+      }, ms);
+    }
+    return { show };
+  })();
+
+  const __m_ui_modal = (() => {
+    const overlay = $('#modal-overlay');
+
+    function close() {
+      overlay.classList.remove('visible');
+      overlay.innerHTML = '';
+      document.removeEventListener('keydown', onEsc);
+    }
+    function onEsc(e) { if (e.key === 'Escape') close(); }
+    function open(html, opts = {}) {
+      const { onMount, wide = false } = opts;
+      overlay.innerHTML = `<div class="modal ${wide ? 'modal-wide' : ''}">${html}</div>`;
+      overlay.classList.add('visible');
+      overlay.onclick = (e) => { if (e.target === overlay) close(); };
+      document.addEventListener('keydown', onEsc);
+      if (onMount) onMount(overlay.querySelector('.modal'));
+    }
+
+    function kzPrompt({ title, message, defaultValue = '', okLabel = 'OK' }) {
+      return new Promise((resolve) => {
+        open(`
+          <div class="modal-head"><h3>${__m_core_html.esc(title)}</h3></div>
+          <div class="modal-body">
+            ${message ? `<p style="font-size:13px;color:var(--ink-2);margin-bottom:10px">${__m_core_html.esc(message)}</p>` : ''}
+            <input type="text" id="kz-prompt-input" value="${__m_core_html.esc(defaultValue)}" />
+          </div>
+          <div class="modal-foot">
+            <button class="btn btn-secondary" id="kz-prompt-cancel">Cancel</button>
+            <button class="btn" id="kz-prompt-ok">${__m_core_html.esc(okLabel)}</button>
+          </div>
+        `, {
+          onMount(modal) {
+            const input = modal.querySelector('#kz-prompt-input');
+            input.focus(); input.select();
+            const submit = () => { const v = input.value.trim(); close(); resolve(v); };
+            modal.querySelector('#kz-prompt-ok').onclick = submit;
+            modal.querySelector('#kz-prompt-cancel').onclick = () => { close(); resolve(null); };
+            input.onkeydown = (e) => { if (e.key === 'Enter') submit(); };
+          }
+        });
+      });
+    }
+
+    function kzConfirm({ title, message, okLabel = 'OK', danger = false }) {
+      return new Promise((resolve) => {
+        open(`
+          <div class="modal-head"><h3>${__m_core_html.esc(title)}</h3></div>
+          <div class="modal-body">
+            <p style="font-size:14px;color:var(--ink-2)">${__m_core_html.esc(message || '')}</p>
+          </div>
+          <div class="modal-foot">
+            <button class="btn btn-secondary" id="kz-confirm-cancel">Cancel</button>
+            <button class="btn ${danger ? 'btn-danger' : ''}" id="kz-confirm-ok">${__m_core_html.esc(okLabel)}</button>
+          </div>
+        `, {
+          onMount(modal) {
+            modal.querySelector('#kz-confirm-ok').focus();
+            modal.querySelector('#kz-confirm-ok').onclick = () => { close(); resolve(true); };
+            modal.querySelector('#kz-confirm-cancel').onclick = () => { close(); resolve(false); };
+          }
+        });
+      });
+    }
+
+    function showHelp() {
+      const tabs = [
+        { id: 'about', label: 'About' },
+        { id: 'folder', label: 'Your folder' },
+        { id: 'roadmap', label: 'Roadmap' }
+      ];
+      const tabsHtml = tabs.map((t, i) =>
+        `<div class="modal-tab ${i === 0 ? 'active' : ''}" data-tab="${t.id}">${t.label}</div>`
+      ).join('');
+      const version = $('meta[name="version"]')?.content || '0.1.0';
+      open(`
+        <div class="modal-head"><h3>Ghoshana</h3></div>
+        <div class="modal-tabs">${tabsHtml}</div>
+        <div class="modal-pane active" data-pane="about">
+          <p><strong>Ghoshana</strong> (घोषणा, "announcement") is the browser version of the <a href="https://github.com/prashnam/prashnam-voice" target="_blank" rel="noopener">prashnam-voice</a> Python desktop tool. It records multilingual polls, announcements, and IVR flows entirely on-device.</p>
+          <p>No server, no API keys, no telemetry. Your projects live in a folder you pick on your own disk.</p>
+          <p style="margin-top:14px;color:var(--muted);font-size:12px">Version <code>${__m_core_html.esc(version)}</code> · <a href="https://github.com/NakliTechie/Ghoshana" target="_blank" rel="noopener">github.com/NakliTechie/Ghoshana</a></p>
+        </div>
+        <div class="modal-pane" data-pane="folder">
+          <p>When you click <strong>Pick a folder</strong>, Ghoshana stores everything as plain JSON inside that folder:</p>
+          <pre style="background:var(--panel-2);padding:10px;border-radius:6px;font-size:12px;font-family:ui-monospace,Menlo,monospace;overflow-x:auto;margin-bottom:10px"><code>&lt;your-folder&gt;/
+  asking-mood-a1b2c3/
+    project.json
+    audio/...    (later layers)
+  ...</code></pre>
+          <p>Closing the tab does not lose your work — your folder is the source of truth. The browser also keeps a mirror in IndexedDB so you see your project list before re-granting folder permission on the next visit.</p>
+          <p>Permissions reset when you close the tab — you'll see a yellow <em>Reconnect</em> pill on next launch; click it to grant access.</p>
+        </div>
+        <div class="modal-pane" data-pane="roadmap">
+          <p>Ghoshana lands in layers:</p>
+          <ul>
+            <li><strong>Layer 0</strong> (now) — framework + persistence + project list/create.</li>
+            <li><strong>Layer 1</strong> — translation pipeline (lifted from <a href="https://naklitechie.github.io/Anuvaad/" target="_blank" rel="noopener">Anuvaad</a>) + poll segment editor.</li>
+            <li><strong>Layer 2</strong> — on-device audio (Web Speech default + take history).</li>
+            <li><strong>Layer 3</strong> — option rotations, announcement domain, IVR DAG editor, ZIP export.</li>
+            <li><strong>Layer 4</strong> — Indic Parler-TTS download-on-demand for high-quality voices.</li>
+          </ul>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-secondary" id="help-close">Close</button>
+        </div>
+      `, {
+        wide: true,
+        onMount(modal) {
+          modal.querySelector('#help-close').onclick = close;
+          modal.querySelectorAll('.modal-tab').forEach(t => {
+            t.onclick = () => {
+              modal.querySelectorAll('.modal-tab').forEach(x => x.classList.remove('active'));
+              modal.querySelectorAll('.modal-pane').forEach(x => x.classList.remove('active'));
+              t.classList.add('active');
+              modal.querySelector(`.modal-pane[data-pane="${t.dataset.tab}"]`).classList.add('active');
+            };
+          });
+        }
+      });
+    }
+
+    function showNewProject() {
+      const langCodes = __m_data_lang.ALL_LANG_CODES;
+      const defaultLangs = new Set(__m_data_lang.DEFAULT_PROJECT_LANGS);
+      const domains = __m_data_domain.ALL_DOMAINS;
+
+      const radioHtml = domains.map(d => {
+        const pack = __m_data_domain.get(d);
+        const checked = d === __m_data_domain.DEFAULT_DOMAIN ? 'checked' : '';
+        return `
+          <label class="radio-option ${checked ? 'selected' : ''}" data-domain="${d}">
+            <input type="radio" name="domain" value="${d}" ${checked}>
+            <div>
+              <div class="radio-label">${__m_core_html.esc(pack.label)}</div>
+              <div class="radio-desc">${__m_core_html.esc(pack.description)}</div>
+            </div>
+          </label>
+        `;
+      }).join('');
+
+      const chipsHtml = langCodes.map(c => {
+        const lang = __m_data_lang.LANGUAGES[c];
+        const sel = defaultLangs.has(c) ? 'selected' : '';
+        return `<span class="lang-chip-input ${sel}" data-code="${c}">${__m_core_html.esc(lang.name)}</span>`;
+      }).join('');
+
+      open(`
+        <div class="modal-head"><h3>New project</h3></div>
+        <div class="modal-body">
+          <div class="form-row">
+            <label for="np-name">Name</label>
+            <input type="text" id="np-name" placeholder="Asking mood" autocomplete="off" />
+          </div>
+          <div class="form-row">
+            <label>Domain</label>
+            <div class="radio-group">${radioHtml}</div>
+          </div>
+          <div class="form-row">
+            <label>Languages</label>
+            <div class="lang-chips-input">${chipsHtml}</div>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-secondary" id="np-cancel">Cancel</button>
+          <button class="btn" id="np-create">Create</button>
+        </div>
+      `, {
+        onMount(modal) {
+          const nameInput = modal.querySelector('#np-name');
+          nameInput.focus();
+
+          modal.querySelectorAll('.radio-option').forEach(r => {
+            r.onclick = (e) => {
+              if (e.target.tagName === 'INPUT') return;
+              modal.querySelector(`input[value="${r.dataset.domain}"]`).checked = true;
+              modal.querySelectorAll('.radio-option').forEach(x => x.classList.remove('selected'));
+              r.classList.add('selected');
+            };
+          });
+
+          modal.querySelectorAll('.lang-chip-input').forEach(c => {
+            c.onclick = () => c.classList.toggle('selected');
+          });
+
+          const submit = async () => {
+            const name = nameInput.value.trim();
+            if (!name) {
+              nameInput.focus();
+              __m_ui_toast.show('Project name is required.', 'warn');
+              return;
+            }
+            const domain = modal.querySelector('input[name=domain]:checked').value;
+            const langs = $$('.lang-chip-input.selected', modal).map(c => c.dataset.code);
+            if (!langs.length) {
+              __m_ui_toast.show('Pick at least one language.', 'warn');
+              return;
+            }
+            close();
+            try {
+              const proj = __m_data_project.createProject({ name, domain, langs });
+              await __m_storage_projects.save(proj);
+              __m_core_state.state.projects.push(proj);
+              __m_ui_toast.show(`Created “${proj.name}”`, 'ok');
+              location.hash = `#/p/${proj.id}`;
+            } catch (err) {
+              __m_ui_toast.show(`Could not create project: ${err.message}`, 'err');
+            }
+          };
+
+          modal.querySelector('#np-create').onclick = submit;
+          modal.querySelector('#np-cancel').onclick = close;
+          nameInput.onkeydown = (e) => { if (e.key === 'Enter') submit(); };
+        }
+      });
+    }
+
+    function maybeShowIntro() {
+      if (localStorage.getItem('ghoshana.introSeen') === '1') return;
+      open(`
+        <div class="modal-head"><h3>Welcome to Ghoshana 📢</h3></div>
+        <div class="modal-body">
+          <p style="font-size:14px;color:var(--ink-2);margin-bottom:12px"><strong>Ghoshana</strong> is the browser-native sibling of <a href="https://github.com/prashnam/prashnam-voice" target="_blank" rel="noopener">prashnam-voice</a> — a tool for authoring multilingual polls, announcements, and IVR scripts.</p>
+          <p style="font-size:14px;color:var(--ink-2);margin-bottom:12px">It runs entirely on your device. Your projects live in a folder <em>you</em> pick.</p>
+          <p style="font-size:13px;color:var(--muted)">This is <strong>Layer 0</strong> — the framework shell. Translation, audio, and the IVR editor land in upcoming layers.</p>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-secondary" id="intro-readme">Read the README</button>
+          <button class="btn" id="intro-ok">Got it</button>
+        </div>
+      `, {
+        onMount(modal) {
+          const dismiss = () => {
+            localStorage.setItem('ghoshana.introSeen', '1');
+            close();
+          };
+          modal.querySelector('#intro-ok').focus();
+          modal.querySelector('#intro-ok').onclick = dismiss;
+          modal.querySelector('#intro-readme').onclick = () => {
+            window.open('https://github.com/NakliTechie/Ghoshana#readme', '_blank', 'noopener');
+            dismiss();
+          };
+        }
+      });
+    }
+
+    return { open, close, kzPrompt, kzConfirm, showHelp, showNewProject, maybeShowIntro };
+  })();
+
+  const __m_ui_overflow_menu = (() => {
+    const el = $('#overflow-menu');
+    function close() {
+      el.classList.remove('visible');
+      el.innerHTML = '';
+      document.removeEventListener('click', onDocClick);
+    }
+    function onDocClick(e) {
+      if (!el.contains(e.target)) close();
+    }
+    function open(items, x, y) {
+      el.innerHTML = items.map((it, i) =>
+        `<div class="item ${it.danger ? 'danger' : ''}" data-i="${i}">${__m_core_html.esc(it.label)}</div>`
+      ).join('');
+      el.style.left = `${x}px`;
+      el.style.top  = `${y}px`;
+      el.classList.add('visible');
+      el.querySelectorAll('.item').forEach(node => {
+        node.onclick = () => {
+          const i = parseInt(node.dataset.i, 10);
+          close();
+          items[i].onSelect?.();
+        };
+      });
+      // Defer to next tick so the originating click doesn't auto-close it.
+      setTimeout(() => document.addEventListener('click', onDocClick), 0);
+    }
+    return { open, close };
+  })();
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // UI — router
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const __m_ui_router = (() => {
+    const routes = ['#/welcome', '#/', '#/p/'];
+    function activeScreenIdFor(hash) {
+      if (hash === '#/welcome') return 'screen-welcome';
+      if (hash.startsWith('#/p/')) return 'screen-editor';
+      return 'screen-list';
+    }
+    function setActive(id) {
+      $$('.screen').forEach(s => s.classList.toggle('active', s.id === id));
+    }
+    function render() {
+      const hash = location.hash || '#/';
+      const { rootHandle } = __m_core_state.state;
+
+      // Guard: no folder → force welcome (even if permission is still 'prompt'
+      // for a freshly-stashed handle that lost its grant — that case has
+      // rootHandle != null and falls through).
+      if (!rootHandle) {
+        if (hash !== '#/welcome') { location.hash = '#/welcome'; return; }
+        setActive('screen-welcome');
+        __m_ui_screen_welcome.render();
+        __m_ui_header.render();
+        return;
+      }
+
+      if (hash === '#/welcome') {
+        setActive('screen-welcome');
+        __m_ui_screen_welcome.render();
+      } else if (hash.startsWith('#/p/')) {
+        const id = decodeURIComponent(hash.slice('#/p/'.length));
+        const proj = __m_storage_projects.findById(id);
+        if (!proj) {
+          __m_ui_toast.show('Project not found.', 'warn');
+          location.hash = '#/';
+          return;
+        }
+        __m_core_state.set({ currentProjectId: id });
+        setActive('screen-editor');
+        __m_ui_screen_editor.render(proj);
+      } else {
+        if (hash !== '#/') { location.hash = '#/'; return; }
+        __m_core_state.set({ currentProjectId: null });
+        setActive('screen-list');
+        __m_ui_screen_list.render();
+      }
+      __m_core_state.set({ route: hash });
+      __m_ui_header.render();
+    }
+    function start() {
+      window.addEventListener('hashchange', render);
+      render();
+    }
+    function go(hash) { location.hash = hash; }
+    return { start, render, go };
+  })();
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // UI — header
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const __m_ui_header = (() => {
+    const brand = $('#brand');
+    const folderPill = $('#folder-pill');
+    const btnDisconnect = $('#btn-disconnect');
+    const btnHelp = $('#btn-help');
+
+    btnHelp.onclick = () => __m_ui_modal.showHelp();
+    btnDisconnect.onclick = async () => {
+      const ok = await __m_ui_modal.kzConfirm({
+        title: 'Disconnect folder?',
+        message: 'Your projects stay on disk. You can reconnect any time.',
+        okLabel: 'Disconnect'
+      });
+      if (!ok) return;
+      await __m_storage_session.detach();
+      location.hash = '#/welcome';
+    };
+
+    function render() {
+      const { rootHandle, rootName, permission, currentProjectId } = __m_core_state.state;
+      const route = location.hash || '#/';
+      const inEditor = route.startsWith('#/p/');
+
+      // Brand + (editor) back + name
+      brand.innerHTML = '';
+      if (inEditor && currentProjectId) {
+        const proj = __m_storage_projects.findById(currentProjectId);
+        const back = document.createElement('span');
+        back.className = 'editor-back';
+        back.textContent = '←';
+        back.onclick = () => __m_ui_router.go('#/');
+        brand.appendChild(back);
+        const name = document.createElement('span');
+        name.className = 'editor-name';
+        name.textContent = proj?.name || '(untitled)';
+        name.title = 'Click to rename';
+        name.onclick = async () => {
+          const next = await __m_ui_modal.kzPrompt({
+            title: 'Rename project',
+            defaultValue: proj.name,
+            okLabel: 'Save'
+          });
+          if (next === null || next === '' || next === proj.name) return;
+          proj.name = next;
+          await __m_storage_projects.save(proj);
+          render();
+          __m_ui_toast.show('Renamed.', 'ok');
+        };
+        brand.appendChild(name);
+      } else {
+        brand.innerHTML = `<span class="devanagari">घ</span>Ghoshana`;
+      }
+
+      // Folder pill
+      if (rootHandle && permission === 'granted') {
+        folderPill.style.display = '';
+        folderPill.classList.remove('reconnect');
+        folderPill.textContent = `📁 ${rootName}`;
+        folderPill.onclick = null;
+        btnDisconnect.style.display = '';
+      } else if (rootHandle && permission === 'prompt') {
+        folderPill.style.display = '';
+        folderPill.classList.add('reconnect');
+        folderPill.textContent = `🔓 Reconnect ${rootName}`;
+        folderPill.onclick = async () => {
+          const ok = await __m_storage_session.reconnect();
+          if (ok) {
+            __m_ui_toast.show('Folder reconnected.', 'ok');
+            __m_ui_router.render();
+          }
+        };
+        btnDisconnect.style.display = '';
+      } else {
+        folderPill.style.display = 'none';
+        btnDisconnect.style.display = 'none';
+      }
+    }
+    return { render };
+  })();
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // UI — screens
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const __m_ui_screen_welcome = (() => {
+    const btnPick = $('#btn-pick-folder');
+    const warn = $('#welcome-warn');
+
+    btnPick.onclick = async () => {
+      if (!__m_core_fs.hasDirPicker) {
+        warn.classList.add('visible');
+        return;
+      }
+      const ok = await __m_storage_session.pickAndAttach();
+      if (ok) {
+        __m_ui_toast.show('Folder connected.', 'ok');
+        location.hash = '#/';
+      }
+    };
+
+    function render() {
+      if (!__m_core_fs.hasDirPicker) {
+        warn.classList.add('visible');
+        btnPick.disabled = true;
+      }
+    }
+    return { render };
+  })();
+
+  const __m_ui_screen_list = (() => {
+    const grid = $('#project-grid');
+    const empty = $('#project-empty');
+    const fab = $('#btn-new-project');
+
+    fab.onclick = () => __m_ui_modal.showNewProject();
+
+    function render() {
+      const { projects, permission } = __m_core_state.state;
+      grid.innerHTML = '';
+
+      // If permission isn't granted, show a banner instead of the FAB CTA only.
+      if (permission !== 'granted') {
+        empty.style.display = 'block';
+        empty.innerHTML = `
+          <div class="emoji">🔒</div>
+          <div class="title">Folder needs permission</div>
+          <div class="hint">Click the yellow Reconnect pill in the header to grant access.</div>
+        `;
+        fab.style.display = 'none';
+        return;
+      }
+
+      fab.style.display = '';
+
+      if (!projects.length) {
+        empty.style.display = 'block';
+        empty.innerHTML = `
+          <div class="emoji">📋</div>
+          <div class="title">No projects yet</div>
+          <div class="hint" style="margin-bottom:18px">Get started with your first poll, announcement, or IVR script.</div>
+          <button class="btn btn-lg" id="empty-new-btn">+ Start a new project</button>
+          <div class="hint" style="margin-top:12px;font-size:12px;opacity:0.7">(or use the + button at the bottom right)</div>
+        `;
+        empty.querySelector('#empty-new-btn').onclick = () => __m_ui_modal.showNewProject();
+        return;
+      }
+      empty.style.display = 'none';
+
+      const sorted = [...projects].sort((a, b) =>
+        (b.updated_at || '').localeCompare(a.updated_at || '')
+      );
+
+      for (const p of sorted) {
+        const card = document.createElement('div');
+        card.className = 'project-card';
+        card.dataset.id = p.id;
+        const segCount = (p.segments || []).length;
+        const langChips = (p.langs || []).map(c =>
+          `<span class="lang-chip">${__m_core_html.esc(c)}</span>`
+        ).join('');
+        card.innerHTML = `
+          <span class="overflow" data-action="overflow">⋮</span>
+          <div class="name">${__m_core_html.esc(p.name)}</div>
+          <div class="meta">
+            <span class="domain-badge">${__m_core_html.esc(p.domain)}</span>
+            ${segCount} segment${segCount === 1 ? '' : 's'}
+          </div>
+          <div class="lang-chips">${langChips}</div>
+        `;
+        card.onclick = (e) => {
+          if (e.target.dataset.action === 'overflow') {
+            e.stopPropagation();
+            const r = e.target.getBoundingClientRect();
+            __m_ui_overflow_menu.open([
+              {
+                label: 'Rename',
+                onSelect: async () => {
+                  const next = await __m_ui_modal.kzPrompt({
+                    title: 'Rename project', defaultValue: p.name, okLabel: 'Save'
+                  });
+                  if (next === null || next === '' || next === p.name) return;
+                  p.name = next;
+                  await __m_storage_projects.save(p);
+                  render();
+                  __m_ui_toast.show('Renamed.', 'ok');
+                }
+              },
+              {
+                label: 'Delete',
+                danger: true,
+                onSelect: async () => {
+                  const ok = await __m_ui_modal.kzConfirm({
+                    title: `Delete “${p.name}”?`,
+                    message: 'The folder and all its files will be removed from disk. This cannot be undone.',
+                    okLabel: 'Delete', danger: true
+                  });
+                  if (!ok) return;
+                  await __m_storage_projects.remove(p.id);
+                  __m_core_state.state.projects = __m_core_state.state.projects.filter(x => x.id !== p.id);
+                  render();
+                  __m_ui_toast.show('Deleted.', 'ok');
+                }
+              }
+            ], r.right - 140, r.bottom + 4);
+            return;
+          }
+          location.hash = `#/p/${p.id}`;
+        };
+        grid.appendChild(card);
+      }
+    }
+    return { render };
+  })();
+
+  const __m_ui_screen_editor_segments = (() => {
+    // Segment editor body — renders per-segment cards with per-language cells.
+    const main = $('#editor-main');
+    let _proj = null;
+    let _debounceTimers = new Map(); // segId → timer
+
+    function effectiveText(proj, seg) {
+      const body = (seg.english || '').trim();
+      if (!body) return '';
+      let raw = body;
+      if (seg.use_template) {
+        if (seg.type === 'question') {
+          const t = (proj.question_template || '').trim();
+          if (t.includes('{body}')) {
+            try { raw = t.replace(/{body}/g, body); } catch { raw = body; }
+          }
+        } else if (seg.type === 'option') {
+          const t = (proj.option_template || '').trim();
+          const n = optionIndex(proj, seg.id);
+          if (t.includes('{body}')) {
+            try { raw = t.replace(/{body}/g, body).replace(/{n}/g, String(n)); } catch { raw = body; }
+          }
+        } else if (seg.type === 'body') {
+          const t = (proj.body_template || '').trim();
+          if (t.includes('{body}')) {
+            try { raw = t.replace(/{body}/g, body); } catch { raw = body; }
+          }
+        }
+      }
+      return raw;
+    }
+
+    function optionIndex(proj, segId) {
+      let n = 0;
+      for (const s of proj.segments) {
+        if (s.type === 'option') {
+          n++;
+          if (s.id === segId) return n;
+        }
+      }
+      return 0;
+    }
+
+    function render(proj) {
+      _proj = proj;
+      main.innerHTML = '';
+
+      const segs = proj.segments || [];
+      if (!segs.length) {
+        renderEmptyState(proj);
+        return;
+      }
+
+      const counters = {};
+      for (const seg of segs) {
+        counters[seg.type] = (counters[seg.type] || 0) + 1;
+        main.appendChild(buildCard(proj, seg, counters[seg.type]));
+      }
+      renderAddRow(proj);
+    }
+
+    function renderEmptyState(proj) {
+      const pack = __m_data_domain.get(proj.domain);
+      const empty = document.createElement('div');
+      empty.className = 'seg-empty-state';
+      const adders = (pack?.segment_types || [])
+        .filter(s => s.addable || s.max === 1)
+        .map(s => `<button class="btn btn-secondary" data-add="${s.name}">+ Add ${__m_core_html.esc(s.label)}</button>`)
+        .join('');
+      // For poll, also offer "Start with question + 2 options" preset.
+      const presetHtml = proj.domain === 'poll'
+        ? `<button class="btn" data-preset="poll">Start with 1 question + 2 options</button>`
+        : '';
+      empty.innerHTML = `
+        <div class="emoji">📝</div>
+        <div class="title">No segments yet</div>
+        <div class="hint">Build your ${__m_core_html.esc(pack?.label || proj.domain)} by adding segments.</div>
+        ${presetHtml}
+        ${adders}
+      `;
+      main.appendChild(empty);
+      empty.querySelectorAll('[data-add]').forEach(b => {
+        b.onclick = () => addSegment(proj, b.dataset.add);
+      });
+      const presetBtn = empty.querySelector('[data-preset="poll"]');
+      if (presetBtn) presetBtn.onclick = () => seedPollPreset(proj);
+    }
+
+    function renderAddRow(proj) {
+      const pack = __m_data_domain.get(proj.domain);
+      if (!pack) return;
+      const addable = (pack.segment_types || []).filter(s => {
+        if (!s.addable) {
+          // Allow first-add when max=1 and no instance exists yet.
+          if (s.max === 1) {
+            return !proj.segments.some(x => x.type === s.name);
+          }
+          return false;
+        }
+        return true;
+      });
+      if (!addable.length) return;
+      const row = document.createElement('div');
+      row.className = 'add-segment-row';
+      row.innerHTML = addable.map(s =>
+        `<button class="add-segment-btn" data-add="${s.name}">+ Add ${__m_core_html.esc(s.label)}</button>`
+      ).join('');
+      main.appendChild(row);
+      row.querySelectorAll('[data-add]').forEach(b => {
+        b.onclick = () => addSegment(proj, b.dataset.add);
+      });
+    }
+
+    async function addSegment(proj, type) {
+      try {
+        const seg = __m_data_project.createSegment({ type, english: '' });
+        proj.segments.push(seg);
+        await __m_storage_projects.save(proj);
+        __m_ui_screen_editor.render(proj);
+        // Focus the new card's textarea
+        const card = main.querySelector(`.seg-card[data-id="${seg.id}"] .seg-textarea`);
+        if (card) card.focus();
+      } catch (err) {
+        __m_ui_toast.show(err.message, 'err');
+      }
+    }
+
+    async function seedPollPreset(proj) {
+      try {
+        proj.segments.push(
+          __m_data_project.createSegment({ type: 'question', english: '' }),
+          __m_data_project.createSegment({ type: 'option', english: '' }),
+          __m_data_project.createSegment({ type: 'option', english: '' })
+        );
+        await __m_storage_projects.save(proj);
+        __m_ui_screen_editor.render(proj);
+        const first = main.querySelector('.seg-card .seg-textarea');
+        if (first) first.focus();
+      } catch (err) {
+        __m_ui_toast.show(err.message, 'err');
+      }
+    }
+
+    async function deleteSegment(proj, segId) {
+      const ok = await __m_ui_modal.kzConfirm({
+        title: 'Delete segment?',
+        message: 'The segment and its translations will be removed from this project.',
+        okLabel: 'Delete', danger: true
+      });
+      if (!ok) return;
+      __m_pipeline_queue.cancelForSegment(segId);
+      proj.segments = proj.segments.filter(s => s.id !== segId);
+      try {
+        await __m_storage_projects.save(proj);
+        __m_ui_screen_editor.render(proj);
+      } catch (err) {
+        __m_ui_toast.show(err.message, 'err');
+      }
+    }
+
+    function buildCard(proj, seg, idx) {
+      const pack = __m_data_domain.get(proj.domain);
+      const spec = (pack?.segment_types || []).find(s => s.name === seg.type);
+      const typeLabel = spec ? spec.label : seg.type;
+
+      const card = document.createElement('div');
+      card.className = 'seg-card';
+      card.dataset.id = seg.id;
+
+      // Head: badge + actions
+      const head = document.createElement('div');
+      head.className = 'seg-head';
+      const badge = document.createElement('span');
+      badge.className = 'seg-badge' + (spec && spec.max === 1 ? ' primary' : '');
+      badge.textContent = (spec && spec.max === 1) ? typeLabel : `${typeLabel} ${idx}`;
+      head.appendChild(badge);
+      const actions = document.createElement('div');
+      actions.className = 'seg-actions';
+      if (spec?.template_field) {
+        const presetBtn = document.createElement('button');
+        presetBtn.className = 'seg-action-btn';
+        presetBtn.textContent = seg.use_template ? 'Preset on' : 'Preset off';
+        presetBtn.onclick = async () => {
+          seg.use_template = !seg.use_template;
+          try {
+            await __m_storage_projects.save(proj);
+            // Re-translate with new effective text
+            triggerTranslate(proj, seg);
+            updateEffectivePreview(card, proj, seg);
+            presetBtn.textContent = seg.use_template ? 'Preset on' : 'Preset off';
+          } catch (err) { __m_ui_toast.show(err.message, 'err'); }
+        };
+        actions.appendChild(presetBtn);
+      }
+      const delBtn = document.createElement('button');
+      delBtn.className = 'seg-action-btn danger';
+      delBtn.textContent = 'Delete';
+      delBtn.disabled = spec ? !spec.deletable : false;
+      if (delBtn.disabled) delBtn.title = `Cannot delete the ${typeLabel.toLowerCase()} segment.`;
+      delBtn.onclick = () => deleteSegment(proj, seg.id);
+      actions.appendChild(delBtn);
+      head.appendChild(actions);
+      card.appendChild(head);
+
+      // English textarea
+      const ta = document.createElement('textarea');
+      ta.className = 'seg-textarea';
+      ta.value = seg.english || '';
+      ta.placeholder = seg.type === 'question' ? 'Type your poll question…'
+                     : seg.type === 'option'   ? 'Type an option…'
+                     : seg.type === 'body'     ? 'Type body text…'
+                                               : 'Type segment text…';
+      ta.oninput = () => onEnglishInput(proj, seg, ta, card);
+      card.appendChild(ta);
+
+      // Effective text preview
+      const eff = document.createElement('div');
+      eff.className = 'seg-effective';
+      eff.dataset.role = 'effective';
+      card.appendChild(eff);
+
+      // Lang grid
+      const grid = document.createElement('div');
+      grid.className = 'lang-grid';
+      grid.dataset.role = 'lang-grid';
+      for (const lang of (proj.langs || [])) {
+        if (lang === 'en') continue; // English source — no need to translate to itself
+        grid.appendChild(buildLangCell(proj, seg, lang));
+      }
+      card.appendChild(grid);
+
+      updateEffectivePreview(card, proj, seg);
+      return card;
+    }
+
+    function buildLangCell(proj, seg, lang) {
+      const cell = document.createElement('div');
+      cell.className = 'lang-cell';
+      cell.dataset.lang = lang;
+      cell.dataset.segId = seg.id;
+      const meta = __m_data_lang.LANGUAGES[lang];
+      const head = document.createElement('div');
+      head.className = 'lang-cell-head';
+      const name = document.createElement('span');
+      name.className = 'lang-cell-name';
+      name.textContent = meta?.name || lang;
+      head.appendChild(name);
+      const status = document.createElement('span');
+      status.className = 'lang-cell-status';
+      status.dataset.role = 'status';
+      head.appendChild(status);
+      cell.appendChild(head);
+      const text = document.createElement('div');
+      text.className = 'lang-cell-text';
+      text.dataset.role = 'text';
+      cell.appendChild(text);
+      // Initial paint from saved translation + current queue status
+      updateLangCell(cell, proj, seg, lang);
+      return cell;
+    }
+
+    function setStatusPill(pillEl, status, error) {
+      const map = {
+        empty: ['Empty', 'status-empty'],
+        pending: ['Queued', 'status-pending'],
+        translating: ['Translating…', 'status-translating'],
+        ready: ['Ready', 'status-ready'],
+        stale: ['Outdated', 'status-stale'],
+        error: ['Error', 'status-error'],
+      };
+      const [label, cls] = map[status] || map.empty;
+      pillEl.className = 'lang-cell-status ' + cls;
+      pillEl.textContent = error ? `Error: ${error}` : label;
+    }
+
+    function updateLangCell(cell, proj, seg, lang) {
+      const flores = __m_data_lang.LANGUAGES[lang]?.flores;
+      const text = cell.querySelector('[data-role="text"]');
+      const pill = cell.querySelector('[data-role="status"]');
+
+      const saved = (seg.translations?.[lang]?.[__m_data_project.CANONICAL_ROTATION]) || '';
+      const qStatus = __m_pipeline_queue.getStatus(seg.id, lang);
+
+      // Render text — prefer queue's latest result when it has one, otherwise saved
+      const display = qStatus.result ?? saved;
+      if (display) {
+        text.textContent = display;
+        text.classList.remove('empty');
+      } else {
+        text.textContent = (seg.english || '').trim() ? '(translation pending)' : '(empty)';
+        text.classList.add('empty');
+      }
+
+      // Pill: prefer live status, falling back to saved/empty.
+      let status = qStatus.status;
+      if (status === 'empty' || !status) {
+        status = (seg.english || '').trim()
+          ? (saved ? 'ready' : 'pending')
+          : 'empty';
+      }
+      setStatusPill(pill, status, qStatus.error);
+    }
+
+    function updateEffectivePreview(card, proj, seg) {
+      const eff = card.querySelector('[data-role="effective"]');
+      if (!eff) return;
+      const raw = effectiveText(proj, seg);
+      if (!raw || raw === (seg.english || '').trim()) {
+        eff.style.display = 'none';
+      } else {
+        eff.style.display = '';
+        eff.innerHTML = `<span class="k">Effective:</span> ${__m_core_html.esc(raw)}`;
+      }
+    }
+
+    function onEnglishInput(proj, seg, ta, card) {
+      seg.english = ta.value;
+      updateEffectivePreview(card, proj, seg);
+      // Mark cells stale immediately so user sees feedback.
+      const grid = card.querySelector('[data-role="lang-grid"]');
+      if (grid) {
+        grid.querySelectorAll('.lang-cell').forEach(c => {
+          const lang = c.dataset.lang;
+          const pill = c.querySelector('[data-role="status"]');
+          if (pill && (seg.english || '').trim()) {
+            setStatusPill(pill, 'pending');
+          } else if (pill) {
+            setStatusPill(pill, 'empty');
+          }
+        });
+      }
+      // Debounce save + translate.
+      const prev = _debounceTimers.get(seg.id);
+      if (prev) clearTimeout(prev);
+      _debounceTimers.set(seg.id, setTimeout(async () => {
+        try {
+          await __m_storage_projects.save(proj);
+          triggerTranslate(proj, seg);
+        } catch (err) {
+          __m_ui_toast.show(err.message, 'err');
+        }
+      }, 700));
+    }
+
+    function triggerTranslate(proj, seg) {
+      const eff = effectiveText(proj, seg);
+      if (!eff.trim()) {
+        // Clear any pending translations for this segment.
+        __m_pipeline_queue.cancelForSegment(seg.id);
+        return;
+      }
+      for (const lang of (proj.langs || [])) {
+        if (lang === 'en') continue;
+        __m_pipeline_queue.enqueue({
+          segId: seg.id, lang, srcText: eff, projectId: proj.id
+        });
+      }
+    }
+
+    function retranslateAll(proj) {
+      // Re-enqueue every segment with non-empty english across all selected
+      // langs. Used when project-level config (templates, langs) changes.
+      for (const seg of (proj.segments || [])) {
+        if ((seg.english || '').trim()) triggerTranslate(proj, seg);
+      }
+    }
+
+    function onTranslateStatus({ segId, lang, status }) {
+      if (!_proj) return;
+      const cell = main.querySelector(`.lang-cell[data-seg-id="${segId}"][data-lang="${lang}"]`);
+      if (!cell) return;
+      const seg = _proj.segments.find(s => s.id === segId);
+      if (!seg) return;
+      updateLangCell(cell, _proj, seg, lang);
+    }
+
+    __m_core_events.on('translate:status', onTranslateStatus);
+
+    return { render, triggerTranslate, retranslateAll, effectiveText };
+  })();
+
+  const __m_ui_screen_editor = (() => {
+    const rail = $('#settings-rail');
+
+    function render(proj) {
+      const canEdit = __m_core_state.state.permission === 'granted';
+      const segCount = (proj.segments || []).length;
+      const created = (proj.created_at || '').slice(0, 10);
+      const updated = (proj.updated_at || '').slice(0, 10);
+
+      // Render segment editor body
+      __m_ui_screen_editor_segments.render(proj);
+
+      // Domain-relevant template fields
+      const templateFields = [];
+      if (proj.domain === 'poll') {
+        templateFields.push(
+          { key: 'question_template', label: 'Question template', hint: 'Wraps each question. Use {body} as the placeholder for what you typed.' },
+          { key: 'option_template',   label: 'Option template',   hint: 'Wraps each option. {body} = your text, {n} = 1-based index.' }
+        );
+      } else if (proj.domain === 'announcement') {
+        templateFields.push(
+          { key: 'body_template', label: 'Body template', hint: 'Wraps each body segment. Use {body} as the placeholder. Leave empty for no wrapping.' }
+        );
+      }
+      const templateBlock = templateFields.length ? `
+        <div class="setting-block">
+          <h4>Templates</h4>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Edit the wrapping text. Per-segment "Preset on/off" toggles whether the segment uses these. Changing a template re-translates affected segments.</div>
+          ${templateFields.map(f => `
+            <div style="margin-bottom:10px">
+              <label style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;display:block;margin-bottom:4px">${__m_core_html.esc(f.label)}</label>
+              <textarea class="seg-textarea" data-template="${f.key}" style="min-height:54px;font-size:13px">${__m_core_html.esc(proj[f.key] || '')}</textarea>
+              <div style="font-size:10px;color:var(--muted);margin-top:3px">${__m_core_html.esc(f.hint)}</div>
+            </div>
+          `).join('')}
+        </div>
+      ` : '';
+
+      rail.innerHTML = `
+        <div class="setting-block">
+          <h4>Project</h4>
+          <div class="setting-row"><span class="k">Domain</span> · ${__m_core_html.esc(proj.domain)}</div>
+          <div class="setting-row"><span class="k">Segments</span> · ${segCount}</div>
+          <div class="setting-row"><span class="k">Created</span> · ${__m_core_html.esc(created)}</div>
+          <div class="setting-row"><span class="k">Updated</span> · ${__m_core_html.esc(updated)}</div>
+        </div>
+        <div class="setting-block">
+          <h4>Languages</h4>
+          <div class="lang-chips-input" id="ed-langs"></div>
+          <div style="font-size:11px;color:var(--muted);margin-top:8px">Tap to add or remove. Translations for removed languages stay on disk and reappear if you re-add the language.</div>
+        </div>
+        ${templateBlock}
+        <div class="setting-block">
+          <h4>About this layer</h4>
+          <div class="setting-row" style="font-size:12px;color:var(--muted)">Layer 1 ships per-segment translation across selected languages. Voices, paces, audio takes, and the IVR DAG editor land in Layer 2+.</div>
+        </div>
+      `;
+
+      // Languages chip group
+      const ed = $('#ed-langs', rail);
+      const sel = new Set(proj.langs);
+      for (const code of __m_data_lang.ALL_LANG_CODES) {
+        const lang = __m_data_lang.LANGUAGES[code];
+        const chip = document.createElement('span');
+        chip.className = 'lang-chip-input' + (sel.has(code) ? ' selected' : '');
+        chip.dataset.code = code;
+        chip.textContent = lang.name;
+        if (!canEdit) chip.style.opacity = '0.6';
+        chip.onclick = async () => {
+          if (!canEdit) {
+            __m_ui_toast.show('Reconnect folder to edit.', 'warn');
+            return;
+          }
+          let added = false;
+          if (sel.has(code)) {
+            if (sel.size === 1) {
+              __m_ui_toast.show('A project needs at least one language.', 'warn');
+              return;
+            }
+            sel.delete(code);
+            // Cancel any in-flight translations for this lang across all segments.
+            for (const s of (proj.segments || [])) {
+              const k = `${s.id}::${code}`;
+              // best-effort: queue.cancelForSegment cancels by seg id only, so abort all and re-trigger needed ones.
+            }
+          } else {
+            sel.add(code);
+            added = true;
+          }
+          proj.langs = Array.from(sel);
+          try {
+            await __m_storage_projects.save(proj);
+            // Re-render the editor body so cells appear/disappear in segment cards.
+            __m_ui_screen_editor_segments.render(proj);
+            // If we added a language, kick off translation for every segment.
+            if (added && code !== 'en') {
+              for (const s of (proj.segments || [])) {
+                if ((s.english || '').trim()) {
+                  __m_ui_screen_editor_segments.triggerTranslate(proj, s);
+                }
+              }
+            }
+            // Update chip's class on the rail in place (saves a full rail re-render).
+            chip.classList.toggle('selected', sel.has(code));
+          } catch (err) {
+            __m_ui_toast.show(err.message, 'err');
+          }
+        };
+        ed.appendChild(chip);
+      }
+
+      // Templates editing (debounced 500ms). On change → save → retranslate all
+      // affected segments (which use the template via use_template=true).
+      let tplTimer = null;
+      rail.querySelectorAll('textarea[data-template]').forEach(ta => {
+        if (!canEdit) {
+          ta.disabled = true;
+          ta.style.opacity = '0.6';
+        }
+        ta.oninput = () => {
+          if (!canEdit) return;
+          if (tplTimer) clearTimeout(tplTimer);
+          const key = ta.dataset.template;
+          tplTimer = setTimeout(async () => {
+            proj[key] = ta.value;
+            try {
+              await __m_storage_projects.save(proj);
+              // Re-render segments so the effective text preview updates.
+              __m_ui_screen_editor_segments.render(proj);
+              // Retranslate every segment whose effective text depends on this template.
+              for (const s of (proj.segments || [])) {
+                const usesThis = s.use_template && (
+                  (key === 'question_template' && s.type === 'question') ||
+                  (key === 'option_template'   && s.type === 'option') ||
+                  (key === 'body_template'     && s.type === 'body')
+                );
+                if (usesThis && (s.english || '').trim()) {
+                  __m_ui_screen_editor_segments.triggerTranslate(proj, s);
+                }
+              }
+            } catch (err) {
+              __m_ui_toast.show(err.message, 'err');
+            }
+          }, 500);
+        };
+      });
+    }
+    return { render };
+  })();
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // BOOT
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Model status bar wiring — surface model download progress while a translate
+  // job kicks off. Uses one bar shared across all segments.
+  (() => {
+    const bar = $('#model-status');
+    const label = $('#model-status-label');
+    const pct = $('#model-status-pct');
+    const fill = $('#model-status-fill');
+    let hideTimer = null;
+    __m_core_events.on('model:progress', (p) => {
+      if (!p) return;
+      bar.classList.add('visible');
+      if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+      const labelText = p.phase === 'downloading' ? `Downloading ${p.file}…`
+                      : p.phase === 'init'         ? `Initialising ${p.file}…`
+                      : p.phase === 'ready'        ? 'Translation model ready'
+                                                    : 'Loading translation model…';
+      label.textContent = labelText;
+      const pctNum = Math.max(0, Math.min(1, p.pct ?? 0));
+      pct.textContent = `${Math.round(pctNum * 100)}%`;
+      fill.style.width = `${(pctNum * 100).toFixed(1)}%`;
+      if (p.phase === 'ready') {
+        hideTimer = setTimeout(() => bar.classList.remove('visible'), 2000);
+      }
+    });
+  })();
+
+  (async () => {
+    await __m_core_idb.init();
+    __m_ui_router.start();
+    await __m_storage_session.checkAndRestore();
+    __m_ui_router.render();
+    // Defer intro by ~200ms so it overlays a rendered screen, not a blank canvas
+    // (CONV.md "First-run intro modal that survives editing", line 131).
+    setTimeout(() => __m_ui_modal.maybeShowIntro(), 200);
+    __m_core_events.on('session:attached', () => __m_ui_router.render());
+    __m_core_events.on('session:detached', () => __m_ui_router.render());
+    // Expose for debug only — opt-in console access.
+    window.__ghoshana = {
+      state: __m_core_state.state,
+      data: __m_data_project,
+      storage: __m_storage_projects,
+      session: __m_storage_session,
+      pipeline: {
+        model: __m_pipeline_model,
+        translate: __m_pipeline_translate,
+        queue: __m_pipeline_queue,
+        lexicon: __m_pipeline_lexicon,
+      }
+    };
+  })();
+  </script>
+</body>
+</html>
