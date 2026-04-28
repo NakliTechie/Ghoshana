@@ -1603,6 +1603,9 @@
         rotations: [],
         // lexicon: { global: {key: replacement}, en: {...}, hi: {...} } per Python projects.py docstring at line 192
         lexicon: { global: {} },
+        // 'mms' (default, on-device VITS via transformers.js) or 'parler'
+        // (HQ tier — Indic Parler-TTS, separate track). See __m_tts_parler.
+        audio_tier: 'mms',
         segments: []
       };
     }
@@ -1639,6 +1642,11 @@
       if (!Array.isArray(project.rotations)) project.rotations = [];
       project.voices = project.voices || {};
       project.paces  = project.paces  || {};
+      // Layer 2: per-project audio tier — 'mms' (default, ships now) or
+      // 'parler' (HQ tier, port in progress — falls back to MMS until the
+      // ONNX export lands). Stored on the project so the same folder gives
+      // identical audio across machines once Parler is ready.
+      if (!project.audio_tier) project.audio_tier = 'mms';
       return project;
     }
 
@@ -2529,6 +2537,49 @@
       isLangSupported, modelFor, isSupported, PACE_RATES,
       MMS_MODEL,
     };
+  })();
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // TTS — Indic Parler-TTS (HQ tier, port in progress)
+  //
+  // Status: NOT YET PORTED — first speak() call throws ParlerNotReady. The
+  // cell dispatch in segments.js catches this and falls back to MMS with a
+  // toast. This stub exists so the audio_tier toggle and per-cell dispatch
+  // are in place, ready to swap in a real implementation once the port
+  // lands.
+  //
+  // Risk gates (per HANDOFF.md "Indic Parler-TTS in the browser" report):
+  //   1. ONNX export — no public export of any Parler-TTS variant exists.
+  //      Need to run Python `optimum-cli export onnx` (or a custom script)
+  //      against parler-tts/parler-tts-mini-v1 first as a sanity check, then
+  //      against ai4bharat/indic-parler-tts which adds the dual-encoder
+  //      complexity. Both export to /Users/chiragpatnaik/Code/prashnam-voice/
+  //      browser-prep/ following the IndicTrans2 precedent and uploaded as
+  //      naklitechie/indic-parler-tts-ONNX.
+  //   2. apply_delay_pattern_mask — Parler's autoregressive decoder uses a
+  //      delay-pattern mask across N codebooks. Port the loop from HF
+  //      transformers (modeling_parler_tts.py) into JS, mirroring the
+  //      Whisper / OuteTTS browser ports' approach. Each step emits codec
+  //      tokens, looped until EOS or max_new_tokens.
+  //   3. DAC codec decoder — onnx-community/dac_44khz-ONNX. Hand the codec
+  //      tokens to dac decoder.onnx → audio waveform → AudioContext (same
+  //      playback path MMS uses).
+  //   4. Two T5 tokenizers — prompt (text to speak) + description (voice
+  //      style). Reuse our IT2 tokenizer infrastructure with new vocab.
+  //
+  // Estimated effort (per the feasibility report): 4-8 weeks. Mobile is dead
+  // (no WebGPU + 1.9 GB fp16 too big). Desktop+WebGPU TTFA: 5-15s per sentence.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const __m_tts_parler = (() => {
+    function isReady() { return false; }
+    function isSupported() { return false; }
+
+    function speak() {
+      throw new Error('Parler-TTS not yet ported. Falling back to MMS.');
+    }
+
+    return { isReady, isSupported, speak, NOT_READY: true };
   })();
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -3783,14 +3834,44 @@
       return (seg.translations?.[lang]?.[__m_data_project.CANONICAL_ROTATION]) || '';
     }
 
-    async function onSpeakClicked(cell, proj, seg, lang) {
-      if (!__m_tts_mms.isSupported()) {
-        __m_ui_toast.show('Audio playback unavailable in this browser.', 'err');
+    function _resolveTier(proj) {
+      // Honour the project's audio_tier preference, but fall back to MMS if
+      // Parler isn't ready yet (port still in progress per __m_tts_parler).
+      const requested = proj.audio_tier || 'mms';
+      if (requested === 'parler' && !__m_tts_parler.isReady()) return 'mms';
+      return requested;
+    }
+
+    async function _ttsSpeak(proj, seg, lang, text, paceRate) {
+      const tier = _resolveTier(proj);
+      const key = `${seg.id}::${lang}`;
+      if (tier === 'parler') {
+        try {
+          await __m_tts_parler.speak(text, { langCode: lang, paceRate, key });
+        } catch (e) {
+          __m_ui_toast.show(e.message || 'Parler unavailable — falling back to MMS.', 'warn');
+          // Recurse via MMS as the fallback.
+          if (__m_tts_mms.isLangSupported(lang)) {
+            __m_tts_mms.speak(text, { langCode: lang, paceRate, key,
+              onError: (err) => __m_ui_toast.show(`Speech failed: ${err.message || 'unknown'}`, 'err'),
+            });
+          }
+        }
         return;
       }
       if (!__m_tts_mms.isLangSupported(lang)) {
         const meta = __m_data_lang.LANGUAGES[lang];
-        __m_ui_toast.show(`No on-device TTS model for ${meta?.name || lang}.`, 'err');
+        __m_ui_toast.show(`No MMS-TTS model for ${meta?.name || lang}. Switch the project's audio tier to Parler once it lands.`, 'err');
+        return;
+      }
+      __m_tts_mms.speak(text, { langCode: lang, paceRate, key,
+        onError: (e) => __m_ui_toast.show(`Speech failed: ${e.message || 'unknown'}`, 'err'),
+      });
+    }
+
+    async function onSpeakClicked(cell, proj, seg, lang) {
+      if (!__m_tts_mms.isSupported()) {
+        __m_ui_toast.show('Audio playback unavailable in this browser.', 'err');
         return;
       }
       // Replay the current take with its frozen pace; if no take exists, regen.
@@ -3800,10 +3881,7 @@
       const take = currentId ? list.find(t => t.id === currentId) : null;
       if (take) {
         const paceRate = __m_tts_mms.PACE_RATES[take.pace] ?? 1.0;
-        __m_tts_mms.speak(take.source_text, {
-          langCode: lang, paceRate, key: `${seg.id}::${lang}`,
-          onError: (e) => __m_ui_toast.show(`Speech failed: ${e.message || 'unknown'}`, 'err'),
-        });
+        await _ttsSpeak(proj, seg, lang, take.source_text, paceRate);
         return;
       }
       onRegenClicked(cell, proj, seg, lang);
@@ -3814,11 +3892,6 @@
         __m_ui_toast.show('Audio playback unavailable in this browser.', 'err');
         return;
       }
-      if (!__m_tts_mms.isLangSupported(lang)) {
-        const meta = __m_data_lang.LANGUAGES[lang];
-        __m_ui_toast.show(`No on-device TTS model for ${meta?.name || lang}.`, 'err');
-        return;
-      }
       const text = _cellTextForSpeak(proj, seg, lang);
       if (!text) {
         __m_ui_toast.show('Nothing to speak yet — type some text first.', 'warn');
@@ -3826,12 +3899,8 @@
       }
       const pace = resolvePace(proj, seg, lang);
       const paceRate = __m_tts_mms.PACE_RATES[pace] ?? 1.0;
-      const key = `${seg.id}::${lang}`;
-      _recordTake(proj, seg, lang, { voiceName: null, pace, sourceText: text });
-      __m_tts_mms.speak(text, {
-        langCode: lang, paceRate, key,
-        onError: (e) => __m_ui_toast.show(`Speech failed: ${e.message || 'unknown'}`, 'err'),
-      });
+      _recordTake(proj, seg, lang, { voiceName: null, pace, sourceText: text, tier: _resolveTier(proj) });
+      await _ttsSpeak(proj, seg, lang, text, paceRate);
     }
 
     function _recordTake(proj, seg, lang, { voiceName, pace, sourceText }) {
@@ -4126,10 +4195,19 @@
 
       const paceOpts = ['very_slow','slow','moderate','fast','very_fast']
         .map(p => `<option value="${p}">${__m_core_html.esc(p.replace('_',' '))}</option>`).join('');
+      const tierActive = proj.audio_tier || 'mms';
+      const parlerReady = __m_tts_parler.isReady();
       const voicesBlock = `
         <div class="setting-block">
           <h4>Audio</h4>
-          <div style="font-size:11px;color:var(--muted);margin-bottom:8px">On-device TTS via Facebook MMS-TTS — one VITS model per language (~50-150 MB), downloaded + cached on first speak. No system voice dependency. Indic Parler-TTS is the higher-quality opt-in tier (separate track).</div>
+          <div style="display:flex;gap:6px;margin-bottom:10px">
+            <button class="btn ${tierActive === 'mms' ? '' : 'btn-secondary'}" data-tier="mms" style="flex:1;font-size:12px;padding:6px 10px">MMS-TTS</button>
+            <button class="btn ${tierActive === 'parler' ? '' : 'btn-secondary'}" data-tier="parler" style="flex:1;font-size:12px;padding:6px 10px" ${parlerReady ? '' : 'disabled title="Port in progress — falls back to MMS"'}>Indic Parler ${parlerReady ? '' : '(soon)'}</button>
+          </div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:8px" id="ed-tier-blurb">${tierActive === 'mms'
+            ? 'MMS-TTS · on-device VITS, ~50-150 MB per language, downloaded + cached on first speak.'
+            : 'Indic Parler-TTS · 0.9B params, dual-encoder, higher quality. Port in progress — currently falls back to MMS.'
+          }</div>
           <label style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;display:block;margin-bottom:4px">Default pace</label>
           <select id="ed-default-pace" style="width:100%;padding:6px 8px;border:1px solid var(--border-2);border-radius:4px;font-size:13px;background:var(--panel);color:var(--ink);margin-bottom:12px">${paceOpts}</select>
           <div id="ed-voices"></div>
@@ -4219,6 +4297,23 @@
         };
         ed.appendChild(chip);
       }
+
+      // Audio tier toggle
+      rail.querySelectorAll('button[data-tier]').forEach(b => {
+        b.onclick = async () => {
+          if (b.disabled) return;
+          const next = b.dataset.tier;
+          if ((proj.audio_tier || 'mms') === next) return;
+          proj.audio_tier = next;
+          try {
+            await __m_storage_projects.save(proj);
+            // Re-render rail so the toggle reflects the new state.
+            __m_ui_screen_editor.render(proj);
+            const label = next === 'parler' ? 'Indic Parler-TTS' : 'MMS-TTS';
+            __m_ui_toast.show(`Audio tier set to ${label}.`, 'ok');
+          } catch (err) { __m_ui_toast.show(err.message, 'err'); }
+        };
+      });
 
       // Default pace
       const defaultPaceSel = $('#ed-default-pace', rail);
@@ -4415,6 +4510,7 @@
         lexicon: __m_pipeline_lexicon,
       },
       tts: __m_tts_mms,
+      tts_parler: __m_tts_parler,
     };
   })();
   </script>
