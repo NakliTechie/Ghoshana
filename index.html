@@ -2154,7 +2154,11 @@
     const KV_KINDS = ['decoder.key', 'decoder.value', 'encoder.key', 'encoder.value'];
     const DECODER_START_ID = 2;
     const EOS_ID = 2;
-    const MAX_NEW_TOKENS = 128;
+    // 256 fits Indic outputs comfortably for templated inputs; 128 (Anuvaad's
+    // value, OK for bare sentences) was truncating mid-word for some Tamil /
+    // Bengali / Telugu sentences and the dangling Devanagari tokens then got
+    // transliterated into garbled Tamil. If we hit this cap we now warn.
+    const MAX_NEW_TOKENS = 256;
 
     function _greedyArgmax(data, dims) {
       const [B, T, V] = dims;
@@ -2226,12 +2230,27 @@
         if (outTokens.length % 8 === 0) await new Promise((r) => setTimeout(r, 0));
       }
 
+      const truncated = nextId !== EOS_ID && outTokens.length >= MAX_NEW_TOKENS + 1;
+      if (truncated) {
+        console.warn(`[translate] hit MAX_NEW_TOKENS=${MAX_NEW_TOKENS} without EOS for ${tgtFlores}. Output may be cut mid-sentence — try shortening the source or bumping MAX_NEW_TOKENS.`);
+      }
       const rawText = tok.decodeTgt(outTokens);
       const [final] = ip.postprocessBatch(rawText, { lang: tgtFlores });
-      return { final, raw: rawText, tokens: outTokens.length };
+      return { final, raw: rawText, tokens: outTokens.length, truncated };
     }
 
-    return { translate };
+    // Bare-pipeline translate (no template, no lexicon, no numerals) — useful
+    // for diagnosing whether artifacts come from the input pipeline or the
+    // model itself. Call as `__ghoshana.pipeline.translate.translateRaw('Hello world', 'tam_Taml')`
+    // and compare against Anuvaad's output for the same string.
+    async function translateRaw(text, flores) {
+      if (!__m_pipeline_model.isReady()) {
+        await __m_pipeline_model.ensureLoaded(() => {});
+      }
+      return translate(text, flores);
+    }
+
+    return { translate, translateRaw, MAX_NEW_TOKENS };
   })();
 
   const __m_pipeline_queue = (() => {
@@ -2477,18 +2496,41 @@
         return null;
       }
       if (!text) return null;
+      // Resolve voice with auto-pick fallback. Without an explicit u.voice
+      // matching the target language, Web Speech silently falls back to the
+      // default English voice when asked to render Tamil/Telugu/etc — which
+      // pronounces the characters phoneme-by-phoneme as English and produces
+      // the audio artifacts you're hearing. So: if voiceName is blank, pick
+      // the first device voice that matches the target lang. If none exists,
+      // error out instead of synthesising gibberish.
+      let voice = findVoiceByName(voiceName);
+      if (!voice && langCode) {
+        const matches = listForLang(langCode);
+        voice = matches[0] || null;
+      }
+      if (langCode && !voice) {
+        const meta = (typeof __m_data_lang !== 'undefined') ? __m_data_lang.LANGUAGES?.[langCode] : null;
+        const langName = meta?.name || langCode;
+        const err = new Error(`No ${langName} voice on this device. Install one via OS settings (macOS: System Settings → Accessibility → Spoken Content → System Voice → Manage Voices…) and reload.`);
+        if (onError) onError(err);
+        else console.warn('[speak]', err.message);
+        return null;
+      }
       stop();
       const u = new SpeechSynthesisUtterance(text);
-      const voice = findVoiceByName(voiceName);
-      if (voice) u.voice = voice;
-      if (langCode) u.lang = defaultLangTag(langCode);
+      if (voice) {
+        u.voice = voice;
+        u.lang = voice.lang;
+      } else if (langCode) {
+        u.lang = defaultLangTag(langCode);
+      }
       u.rate = PACE_RATES[pace] ?? 1.0;
       u.pitch = 1.0;
       u.onend = () => { _emitActive(false, key); if (onEnd) onEnd(); };
       u.onerror = (e) => { _emitActive(false, key); if (onError) onError(e); };
       _emitActive(true, key);
       speechSynthesis.speak(u);
-      return u;
+      return { utterance: u, voice };
     }
 
     function stop() {
@@ -3954,7 +3996,7 @@
           <label style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;display:block;margin-bottom:4px">Default pace</label>
           <select id="ed-default-pace" style="width:100%;padding:6px 8px;border:1px solid var(--border-2);border-radius:4px;font-size:13px;background:var(--panel);color:var(--ink);margin-bottom:12px">${paceOpts}</select>
           <div id="ed-voices"></div>
-          <div style="font-size:10px;color:var(--muted);margin-top:6px">Voices show "(default)" until you've spoken at least once. Reload if voices look incomplete.</div>
+          <div style="font-size:10px;color:var(--muted);margin-top:6px">Languages with no native voice on this device fall back to garbled English-phoneme rendering — install OS voices (macOS: System Settings → Accessibility → Spoken Content → System Voice → Manage Voices…) for clean audio.</div>
         </div>
       `;
 
@@ -4110,17 +4152,25 @@
       await __m_audio_speech.ensureVoices();
       host.innerHTML = '';
       const paceList = ['very_slow','slow','moderate','fast','very_fast'];
+      const missing = [];
       for (const lang of (proj.langs || [])) {
         const meta = __m_data_lang.LANGUAGES[lang];
         if (!meta) continue;
         const voices = __m_audio_speech.listForLang(lang);
+        if (!voices.length && lang !== 'en') missing.push(meta.name);
         const wrap = document.createElement('div');
         wrap.style.marginBottom = '10px';
+        // Show the auto-picked voice in the "(default)" label so the user
+        // knows what'll actually be used when no explicit voice is set.
+        const autoVoice = voices[0];
+        const autoLabel = autoVoice
+          ? `(auto · ${__m_audio_speech.shortName(autoVoice)} · ${autoVoice.lang})`
+          : (lang === 'en' ? '(device default)' : '(no voice installed)');
         wrap.innerHTML = `
-          <label style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;display:block;margin-bottom:4px">${__m_core_html.esc(meta.name)}</label>
+          <label style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;display:block;margin-bottom:4px">${__m_core_html.esc(meta.name)}${voices.length === 0 && lang !== 'en' ? ' <span style="color:var(--err-text);text-transform:none;letter-spacing:0">no voice installed</span>' : ''}</label>
           <div style="display:flex;gap:6px">
             <select data-vlang="${lang}" data-role="voice" style="flex:1;padding:5px 6px;border:1px solid var(--border-2);border-radius:4px;font-size:12px;background:var(--panel);color:var(--ink)">
-              <option value="">(device default)</option>
+              <option value="">${__m_core_html.esc(autoLabel)}</option>
               ${voices.map(v => `<option value="${__m_core_html.esc(v.name)}">${__m_core_html.esc(__m_audio_speech.shortName(v))} · ${__m_core_html.esc(v.lang)}</option>`).join('')}
             </select>
             <select data-vlang="${lang}" data-role="pace" style="width:110px;padding:5px 6px;border:1px solid var(--border-2);border-radius:4px;font-size:12px;background:var(--panel);color:var(--ink)">
