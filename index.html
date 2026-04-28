@@ -2390,31 +2390,52 @@
   // ═══════════════════════════════════════════════════════════════════════════
 
   const __m_tts_mms = (() => {
-    // ISO-639-1 → Xenova MMS-TTS model id. Most Indic langs have coverage;
-    // a handful of smaller scheduled langs may 404 — caller should check
-    // isLangSupported() before queuing.
+    // ISO-639-1 → MMS-TTS ONNX model id.
+    //
+    // Reality of the public ONNX ecosystem (verified via HF API on 2026-04-28):
+    //   - Xenova has converted only 12 MMS langs to ONNX; among Indic, just
+    //     eng + hin. The other Xenova/mms-tts-<lang> IDs (tam, tel, ben, ...)
+    //     simply do not exist and 404, which is why those cells fail.
+    //   - onnx-community has one Indic MMS export: kan (Kannada) at
+    //     onnx-community/mms-tts-kan-ONNX (note the -ONNX suffix and the 3-letter ISO
+    //     code variant).
+    //   - The PyTorch repos at facebook/mms-tts-<lang> exist for every Indic
+    //     lang but transformers.js can't load PyTorch in the browser.
+    //
+    // Plan: run `optimum-cli export onnx facebook/mms-tts-<lang>` for each
+    // missing Indic lang and publish at naklitechie/mms-tts-<lang>-ONNX
+    // (mirrors how we shipped naklitechie/indictrans2-en-indic-dist-200M-ONNX).
+    // Once those are up, swap their entries below from null to the new IDs.
+    //
+    // For now: only en/hi/kn are wired. Other langs return null from
+    // modelFor() so the rail flags them \"no MMS model — needs export\" and
+    // the cell speak path errors out cleanly instead of confusingly 404-ing.
     const MMS_MODEL = {
       en:  'Xenova/mms-tts-eng',
       hi:  'Xenova/mms-tts-hin',
-      ta:  'Xenova/mms-tts-tam',
-      te:  'Xenova/mms-tts-tel',
-      bn:  'Xenova/mms-tts-ben',
-      mr:  'Xenova/mms-tts-mar',
-      kn:  'Xenova/mms-tts-kan',
-      gu:  'Xenova/mms-tts-guj',
-      ml:  'Xenova/mms-tts-mal',
-      pa:  'Xenova/mms-tts-pan',
-      or:  'Xenova/mms-tts-ory',
-      as:  'Xenova/mms-tts-asm',
-      ur:  'Xenova/mms-tts-urd-script_arabic',
-      ne:  'Xenova/mms-tts-npi',
-      sa:  'Xenova/mms-tts-san',
-      mai: 'Xenova/mms-tts-mai',
-      sd:  'Xenova/mms-tts-snd',
-      kok: 'Xenova/mms-tts-kok',
-      mni: 'Xenova/mms-tts-mni',
-      sat: 'Xenova/mms-tts-sat',
-      // ks (Kashmiri), brx (Bodo), doi (Dogri) — not in MMS coverage; warn in UI.
+      kn:  'onnx-community/mms-tts-kan-ONNX',
+      // Awaiting export — the underlying facebook/mms-tts-<lang> PyTorch
+      // repos exist and convert cleanly via optimum-cli. Tracked in
+      // README.md under \"MMS-TTS coverage\".
+      ta:  null,  // facebook/mms-tts-tam → naklitechie/mms-tts-tam-ONNX
+      te:  null,  // facebook/mms-tts-tel
+      bn:  null,  // facebook/mms-tts-ben
+      mr:  null,  // facebook/mms-tts-mar
+      gu:  null,  // facebook/mms-tts-guj
+      ml:  null,  // facebook/mms-tts-mal
+      pa:  null,  // facebook/mms-tts-pan
+      or:  null,  // facebook/mms-tts-ory
+      as:  null,  // facebook/mms-tts-asm
+      ur:  null,  // facebook/mms-tts-urd-script_arabic
+      ne:  null,  // facebook/mms-tts-npi
+      sa:  null,  // facebook/mms-tts-san
+      mai: null,  // facebook/mms-tts-mai
+      sd:  null,  // facebook/mms-tts-snd-script_devanagari
+      kok: null,  // facebook/mms-tts-kok
+      mni: null,  // facebook/mms-tts-mni
+      sat: null,  // facebook/mms-tts-sat
+      // ks (Kashmiri), brx (Bodo), doi (Dogri) — no facebook/mms-tts-* repo
+      // exists at all. Need Parler tier (or a non-MMS engine) for these.
     };
 
     let _TJS = null;
@@ -2444,6 +2465,12 @@
 
     function isLangSupported(langCode) { return !!MMS_MODEL[langCode]; }
     function modelFor(langCode) { return MMS_MODEL[langCode] || null; }
+    function knownLangs() { return Object.keys(MMS_MODEL); }
+    function pendingExport(langCode) {
+      // Returns true if the lang is in MMS_MODEL but mapped to null —
+      // i.e. PyTorch source exists but ONNX export is pending.
+      return langCode in MMS_MODEL && MMS_MODEL[langCode] == null;
+    }
 
     async function ensureLoaded(langCode, onProgress) {
       if (_pipelines.has(langCode)) return _pipelines.get(langCode);
@@ -2534,7 +2561,7 @@
 
     return {
       ensureLoaded, speak, stop, onActiveChange, onProgress,
-      isLangSupported, modelFor, isSupported, PACE_RATES,
+      isLangSupported, modelFor, knownLangs, pendingExport, isSupported, PACE_RATES,
       MMS_MODEL,
     };
   })();
@@ -4386,13 +4413,16 @@
         const meta = __m_data_lang.LANGUAGES[lang];
         if (!meta) continue;
         const supported = __m_tts_mms.isLangSupported(lang);
+        const pending = !supported && __m_tts_mms.pendingExport(lang);
         if (!supported) unsupported.push(meta.name);
         const wrap = document.createElement('div');
         wrap.style.marginBottom = '10px';
         const modelId = __m_tts_mms.modelFor(lang);
         const subText = supported
           ? `<span style="text-transform:none;letter-spacing:0;color:var(--muted);font-size:10px">${__m_core_html.esc(modelId)}</span>`
-          : `<span style="color:var(--err-text);text-transform:none;letter-spacing:0;font-size:10px">no MMS model — Parler tier needed</span>`;
+          : pending
+            ? `<span style="color:var(--warn-text);text-transform:none;letter-spacing:0;font-size:10px">ONNX export pending — PyTorch source exists</span>`
+            : `<span style="color:var(--err-text);text-transform:none;letter-spacing:0;font-size:10px">no MMS model — Parler tier needed</span>`;
         wrap.innerHTML = `
           <label style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;display:block;margin-bottom:4px">${__m_core_html.esc(meta.name)} · ${subText}</label>
           <div style="display:flex;gap:6px">

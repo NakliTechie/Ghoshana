@@ -6,15 +6,29 @@
 
 ## Status
 
-**Layer 0** — framework and persistence shell. Pick a folder, create projects with name/domain/languages, and they save to disk as JSON. No segments, translation, or audio yet.
+Working today: poll authoring with on-device translation across 22 Indic languages, lexicon, take history, and on-device audio for the languages with shipped ONNX models.
 
 Roadmap:
 
 - ✅ **Layer 0** — file-system persistence + project list + create flow.
-- ⏳ **Layer 1** — translation pipeline (lifted from [Anuvaad](https://github.com/NakliTechie/Anuvaad)) + poll segment editor.
-- ⏳ **Layer 2** — on-device audio (Web Speech default + take history).
+- ✅ **Layer 1** — IndicTrans2 translation pipeline + poll segment editor + lexicon UI + numeral normalization + English passthrough.
+- ✅ **Layer 2 (partial)** — on-device TTS via MMS-TTS, take history with voice/pace + per-segment override.
 - ⏳ **Layer 3** — option rotations, announcement domain, IVR DAG editor, ZIP export.
-- ⏳ **Layer 4** — Indic Parler-TTS download-on-demand toggle for high-quality voices.
+- ⏳ **Layer 4** — Indic Parler-TTS download-on-demand toggle for high-quality voices (separate track — port in progress).
+
+### MMS-TTS coverage
+
+On-device TTS uses Facebook's MMS-TTS via [transformers.js](https://huggingface.co/docs/transformers.js). Each language is a separate ~30-150 MB ONNX model, downloaded + cached on first speak.
+
+| Language | ONNX repo | Status |
+|---|---|---|
+| English | `Xenova/mms-tts-eng` | ✅ working |
+| Hindi | `Xenova/mms-tts-hin` | ✅ working |
+| Kannada | `onnx-community/mms-tts-kan-ONNX` | ✅ working |
+| Tamil, Telugu, Bengali, Marathi, Gujarati, Malayalam, Punjabi, Odia, Assamese, Urdu, Nepali, Sanskrit, Maithili, Sindhi, Konkani, Manipuri, Santali | _PyTorch source at `facebook/mms-tts-<lang>` exists; ONNX export pending_ | ⏳ needs export |
+| Kashmiri, Bodo, Dogri | _no `facebook/mms-tts-*` repo_ | ❌ Parler tier needed |
+
+To unlock the pending languages, run `optimum-cli export onnx --model facebook/mms-tts-<lang> mms-tts-<lang>-onnx/` and upload to `naklitechie/mms-tts-<lang>-ONNX`. VITS is well-supported by `optimum`, so each export is a one-shot Python command per language (no custom code).
 
 ## How to run
 
