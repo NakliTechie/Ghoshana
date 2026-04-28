@@ -707,6 +707,42 @@
       margin-top: 4px; text-decoration: underline;
     }
     .lang-cell-retry:hover { color: var(--teal-600); }
+    .lang-cell-actions {
+      display: flex; gap: 4px; align-items: center;
+      margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border);
+    }
+    .lang-cell-btn {
+      background: var(--panel); border: 1px solid var(--border);
+      padding: 3px 8px; border-radius: 4px; font-size: 11px;
+      color: var(--ink-2); cursor: pointer; font-family: inherit;
+      display: inline-flex; align-items: center; gap: 4px;
+    }
+    .lang-cell-btn:hover:not(:disabled) {
+      border-color: var(--teal); color: var(--teal);
+    }
+    .lang-cell-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .lang-cell-btn.playing {
+      background: var(--teal); color: var(--on-teal); border-color: var(--teal);
+    }
+    .lang-cell-meta {
+      font-size: 10px; color: var(--muted);
+      margin-left: auto;
+    }
+    .takes-popover {
+      position: absolute; z-index: 30;
+      background: var(--panel); border: 1px solid var(--border-2);
+      border-radius: 6px; box-shadow: var(--shadow-md);
+      padding: 4px 0; min-width: 200px;
+    }
+    .takes-popover .take-row {
+      padding: 6px 12px; cursor: pointer; font-size: 12px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .takes-popover .take-row:hover { background: var(--panel-2); }
+    .takes-popover .take-row.current {
+      background: var(--teal-50); font-weight: 600;
+    }
+    .takes-popover .take-row .take-time { color: var(--muted); font-size: 10px; margin-left: auto; }
     .add-segment-row { margin-top: 10px; }
     .add-segment-btn {
       background: var(--panel); border: 1px dashed var(--border-2);
@@ -1862,6 +1898,75 @@
   // PIPELINE — model cache, lazy loader, greedy translate, lexicon
   // ═══════════════════════════════════════════════════════════════════════════
 
+  const __m_pipeline_normalize = (() => {
+    // Port of /Users/chiragpatnaik/Code/prashnam-voice/prashnam_voice/text_normalize.py.
+    // Convert standalone numerals in English source to spelled-out words so
+    // Indic TTS doesn't choke on digits. Cardinal English only (matches the
+    // common case num2words handles for `lang='en'` without ordinal/year flags).
+    const ONES = ['zero','one','two','three','four','five','six','seven','eight','nine',
+      'ten','eleven','twelve','thirteen','fourteen','fifteen','sixteen','seventeen','eighteen','nineteen'];
+    const TENS = ['', '', 'twenty','thirty','forty','fifty','sixty','seventy','eighty','ninety'];
+
+    function _belowThousand(n) {
+      if (n < 20) return ONES[n];
+      if (n < 100) {
+        const t = TENS[Math.floor(n / 10)];
+        const o = n % 10;
+        return o ? `${t}-${ONES[o]}` : t;
+      }
+      const h = Math.floor(n / 100);
+      const r = n % 100;
+      return r ? `${ONES[h]} hundred and ${_belowThousand(r)}` : `${ONES[h]} hundred`;
+    }
+
+    function _intToWords(n) {
+      if (n === 0) return 'zero';
+      let neg = '';
+      if (n < 0) { neg = 'minus '; n = -n; }
+      const parts = [];
+      const scales = [
+        { v: 1_000_000_000_000, name: 'trillion' },
+        { v: 1_000_000_000,     name: 'billion' },
+        { v: 1_000_000,         name: 'million' },
+        { v: 1_000,             name: 'thousand' },
+      ];
+      for (const { v, name } of scales) {
+        if (n >= v) {
+          const cnt = Math.floor(n / v);
+          parts.push(`${_intToWords(cnt)} ${name}`);
+          n %= v;
+        }
+      }
+      if (n > 0) parts.push(_belowThousand(n));
+      return neg + parts.join(' ').replace(/\s+/g, ' ').trim();
+    }
+
+    function _numToWords(s) {
+      // s is the matched substring. Strip thousands commas; handle decimals.
+      const stripped = s.replace(/,/g, '');
+      if (/^\d+\.\d+$/.test(stripped)) {
+        const [intPart, fracPart] = stripped.split('.');
+        const intWords = _intToWords(parseInt(intPart, 10));
+        const fracWords = Array.from(fracPart).map(d => ONES[parseInt(d, 10)]).join(' ');
+        return `${intWords} point ${fracWords}`;
+      }
+      const n = parseInt(stripped, 10);
+      if (!Number.isFinite(n) || Math.abs(n) > 1e15) return s;
+      return _intToWords(n);
+    }
+
+    const NUM_RE = /\b(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\b/g;
+
+    function numeralsToWords(text, lang = 'en') {
+      // Layer 2: English-only cardinal. The Python tool also normalizes for
+      // other langs but we always normalize at the source side (English).
+      if (!text || lang !== 'en') return text;
+      return text.replace(NUM_RE, (m) => _numToWords(m));
+    }
+
+    return { numeralsToWords };
+  })();
+
   const __m_pipeline_lexicon = (() => {
     // JS port of /Users/chiragpatnaik/Code/prashnam-voice/browser-prep/js/lexicon.js.
     // Whole-word substitution, longest-keys-first, per-language overrides over global.
@@ -2209,13 +2314,10 @@
         const flores = __m_data_lang.LANGUAGES[lang]?.flores;
         if (!flores) throw new Error(`unknown lang: ${lang}`);
 
-        // Apply lexicon (global + per-flores) before translating.
+        // srcText comes pre-processed (lexicon + template + numerals) from the
+        // segment editor's effectiveText(seg, flores). Translate as-is.
         const proj = __m_storage_projects.findById(projectId);
-        const withLex = proj
-          ? __m_pipeline_lexicon.applyLexicon(srcText, proj.lexicon, flores)
-          : srcText;
-
-        const { final } = await __m_pipeline_translate.translate(withLex, flores, { signal: ac.signal });
+        const { final } = await __m_pipeline_translate.translate(srcText, flores, { signal: ac.signal });
 
         // Persist into the project segment.translations[lang][r0].
         if (proj) {
@@ -2246,6 +2348,146 @@
     }
 
     return { enqueue, cancelForSegment, getStatus };
+  })();
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // AUDIO — Web Speech API wrapper (Layer 2 default; Indic Parler-TTS in Layer 4)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const __m_audio_speech = (() => {
+    const PACE_RATES = {
+      very_slow: 0.5,
+      slow:      0.75,
+      moderate:  1.0,
+      fast:      1.25,
+      very_fast: 1.5,
+    };
+
+    // Map our 2-letter ISO codes to BCP-47 prefixes that browser voices
+    // typically advertise. Voices ARE filtered by these tags downstream.
+    const LANG_TAG_PREFIXES = {
+      en:  ['en'],
+      hi:  ['hi'],
+      ta:  ['ta'],
+      te:  ['te'],
+      bn:  ['bn'],
+      mr:  ['mr'],
+      kn:  ['kn'],
+      gu:  ['gu'],
+      ml:  ['ml'],
+      or:  ['or'],
+      pa:  ['pa'],
+      as:  ['as'],
+      ur:  ['ur'],
+      ne:  ['ne'],
+      sa:  ['sa'],
+      mai: ['mai'],
+      ks:  ['ks'],
+      sd:  ['sd'],
+      brx: ['brx'],
+      doi: ['doi'],
+      kok: ['kok', 'kok-IN'],
+      mni: ['mni'],
+      sat: ['sat'],
+    };
+
+    let _voices = [];
+    let _voicesPromise = null;
+    let _supported = typeof speechSynthesis !== 'undefined';
+
+    function _loadVoices() {
+      if (!_supported) return Promise.resolve([]);
+      if (_voicesPromise) return _voicesPromise;
+      _voicesPromise = new Promise((resolve) => {
+        const tryGet = () => {
+          const v = speechSynthesis.getVoices();
+          if (v && v.length) { _voices = v; resolve(v); return true; }
+          return false;
+        };
+        if (tryGet()) return;
+        speechSynthesis.onvoiceschanged = () => { if (tryGet()) speechSynthesis.onvoiceschanged = null; };
+        // Some browsers never fire — poll up to ~2s
+        let tries = 0;
+        const iv = setInterval(() => {
+          tries++;
+          if (tryGet() || tries > 20) {
+            clearInterval(iv);
+            resolve(_voices);
+          }
+        }, 100);
+      });
+      return _voicesPromise;
+    }
+
+    async function ensureVoices() {
+      if (_voices.length) return _voices;
+      return _loadVoices();
+    }
+
+    function listForLang(langCode) {
+      // Returns SpeechSynthesisVoice[] whose `lang` BCP-47 starts with one
+      // of our prefixes. Caller should ensureVoices() first.
+      const prefixes = LANG_TAG_PREFIXES[langCode] || [langCode];
+      const out = [];
+      for (const v of _voices) {
+        const tag = (v.lang || '').toLowerCase();
+        if (prefixes.some(p => tag === p.toLowerCase() || tag.startsWith(p.toLowerCase() + '-'))) {
+          out.push(v);
+        }
+      }
+      return out;
+    }
+
+    function findVoiceByName(name) {
+      if (!name) return null;
+      return _voices.find(v => v.name === name) || null;
+    }
+
+    function defaultLangTag(langCode) {
+      // Pick the first available voice's tag for the lang, else fall back to
+      // the bare prefix.
+      const list = listForLang(langCode);
+      return list[0]?.lang || (LANG_TAG_PREFIXES[langCode]?.[0] || langCode);
+    }
+
+    let _onActiveChange = null;
+    function onActiveChange(fn) { _onActiveChange = fn; }
+
+    function _emitActive(active, key) {
+      if (_onActiveChange) _onActiveChange({ active, key });
+    }
+
+    function speak(text, { voiceName, pace = 'moderate', langCode, key, onEnd, onError } = {}) {
+      if (!_supported) {
+        if (onError) onError(new Error('Web Speech API unavailable.'));
+        return null;
+      }
+      if (!text) return null;
+      stop();
+      const u = new SpeechSynthesisUtterance(text);
+      const voice = findVoiceByName(voiceName);
+      if (voice) u.voice = voice;
+      if (langCode) u.lang = defaultLangTag(langCode);
+      u.rate = PACE_RATES[pace] ?? 1.0;
+      u.pitch = 1.0;
+      u.onend = () => { _emitActive(false, key); if (onEnd) onEnd(); };
+      u.onerror = (e) => { _emitActive(false, key); if (onError) onError(e); };
+      _emitActive(true, key);
+      speechSynthesis.speak(u);
+      return u;
+    }
+
+    function stop() {
+      if (!_supported) return;
+      if (speechSynthesis.speaking || speechSynthesis.pending) {
+        speechSynthesis.cancel();
+      }
+      _emitActive(false, null);
+    }
+
+    function isSupported() { return _supported; }
+
+    return { ensureVoices, listForLang, findVoiceByName, defaultLangTag, speak, stop, isSupported, onActiveChange, PACE_RATES };
   })();
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -2522,7 +2764,123 @@
       });
     }
 
-    return { open, close, kzPrompt, kzConfirm, showHelp, showNewProject, maybeShowIntro };
+    function showLexiconEditor(proj, onSaved) {
+      // Tabs: Global + each FLORES code from proj.langs (excluding eng_Latn —
+      // English source rarely needs an English-source-side replacement).
+      const langs = (proj.langs || []).filter(c => c !== 'en');
+      const scopes = ['global', ...langs.map(c => __m_data_lang.LANGUAGES[c]?.flores).filter(Boolean)];
+      const labelFor = (s) => s === 'global' ? 'Global' : (Object.values(__m_data_lang.LANGUAGES).find(L => L.flores === s)?.name || s);
+
+      // Working copy — we don't mutate proj.lexicon until "Save".
+      const work = JSON.parse(JSON.stringify(proj.lexicon || { global: {} }));
+      for (const s of scopes) work[s] = work[s] || {};
+
+      let activeScope = scopes[0];
+
+      const tabsHtml = scopes.map((s, i) =>
+        `<div class="modal-tab ${i === 0 ? 'active' : ''}" data-scope="${__m_core_html.esc(s)}">${__m_core_html.esc(labelFor(s))} <span class="lex-count" data-c="${__m_core_html.esc(s)}" style="font-size:10px;color:var(--muted);margin-left:4px"></span></div>`
+      ).join('');
+
+      open(`
+        <div class="modal-head"><h3>Lexicon</h3></div>
+        <div class="modal-tabs">${tabsHtml}</div>
+        <div class="modal-body" style="max-height:55vh;overflow-y:auto">
+          <p style="font-size:13px;color:var(--ink-2);margin-bottom:10px">Whole-word substitutions applied <em>before</em> translation. Global entries apply to every language; per-language entries override (e.g. "BJP" → "बीजेपी" only for Hindi).</p>
+          <div id="lex-rows"></div>
+          <button class="btn btn-secondary" id="lex-add" style="margin-top:8px;font-size:12px;padding:6px 12px">+ Add entry</button>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-secondary" id="lex-cancel">Cancel</button>
+          <button class="btn" id="lex-save">Save</button>
+        </div>
+      `, {
+        wide: true,
+        onMount(modal) {
+          const rowsHost = modal.querySelector('#lex-rows');
+          function renderCounts() {
+            for (const s of scopes) {
+              const c = Object.keys(work[s] || {}).filter(k => k).length;
+              const el = modal.querySelector(`.lex-count[data-c="${CSS.escape(s)}"]`);
+              if (el) el.textContent = c ? `(${c})` : '';
+            }
+          }
+          function renderRows() {
+            rowsHost.innerHTML = '';
+            const entries = Object.entries(work[activeScope] || {});
+            if (!entries.length) {
+              rowsHost.innerHTML = `<div style="font-size:12px;color:var(--muted);padding:14px;text-align:center;border:1px dashed var(--border-2);border-radius:6px">No entries for ${__m_core_html.esc(labelFor(activeScope))}. Click + Add entry.</div>`;
+              return;
+            }
+            for (const [key, val] of entries) {
+              rowsHost.appendChild(buildLexRow(activeScope, key, val));
+            }
+          }
+          function buildLexRow(scope, key, val) {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;gap:6px;margin-bottom:6px';
+            row.innerHTML = `
+              <input type="text" class="lex-key" placeholder="Term (e.g. BJP)" value="${__m_core_html.esc(key)}" style="flex:1;padding:7px 9px;border:1px solid var(--border-2);border-radius:4px;font-size:13px;background:var(--panel);color:var(--ink)">
+              <input type="text" class="lex-val" placeholder="Replacement" value="${__m_core_html.esc(val)}" style="flex:1.4;padding:7px 9px;border:1px solid var(--border-2);border-radius:4px;font-size:13px;background:var(--panel);color:var(--ink)">
+              <button class="seg-action-btn danger" title="Remove">⨯</button>
+            `;
+            const k = row.querySelector('.lex-key');
+            const v = row.querySelector('.lex-val');
+            const updateKey = () => {
+              const newKey = k.value;
+              if (newKey === key) return;
+              if (work[scope][key] !== undefined) delete work[scope][key];
+              if (newKey) work[scope][newKey] = v.value;
+              key = newKey;
+              renderCounts();
+            };
+            k.onchange = updateKey;
+            v.oninput  = () => { if (key) work[scope][key] = v.value; };
+            row.querySelector('button').onclick = () => {
+              if (key) delete work[scope][key];
+              row.remove();
+              renderCounts();
+            };
+            return row;
+          }
+          modal.querySelectorAll('.modal-tab').forEach(t => {
+            t.onclick = () => {
+              modal.querySelectorAll('.modal-tab').forEach(x => x.classList.remove('active'));
+              t.classList.add('active');
+              activeScope = t.dataset.scope;
+              renderRows();
+            };
+          });
+          modal.querySelector('#lex-add').onclick = () => {
+            // Insert an empty pair; caller types key first.
+            const tempKey = '';
+            const row = buildLexRow(activeScope, tempKey, '');
+            rowsHost.appendChild(row);
+            row.querySelector('.lex-key').focus();
+          };
+          modal.querySelector('#lex-cancel').onclick = close;
+          modal.querySelector('#lex-save').onclick = async () => {
+            // Strip empty keys.
+            for (const s of scopes) {
+              for (const k of Object.keys(work[s] || {})) {
+                if (!k) delete work[s][k];
+              }
+            }
+            proj.lexicon = work;
+            close();
+            try {
+              if (onSaved) await onSaved();
+              __m_ui_toast.show('Lexicon saved.', 'ok');
+            } catch (e) {
+              __m_ui_toast.show('Save failed: ' + e.message, 'err');
+            }
+          };
+          renderCounts();
+          renderRows();
+        }
+      });
+    }
+
+    return { open, close, kzPrompt, kzConfirm, showHelp, showNewProject, maybeShowIntro, showLexiconEditor };
   })();
 
   const __m_ui_overflow_menu = (() => {
@@ -2839,9 +3197,17 @@
     let _proj = null;
     let _debounceTimers = new Map(); // segId → timer
 
-    function effectiveText(proj, seg) {
-      const body = (seg.english || '').trim();
+    function effectiveText(proj, seg, langFlores = null) {
+      // Mirror of /Users/chiragpatnaik/Code/prashnam-voice/prashnam_voice/projects.py
+      // effective_text(): lexicon (global + per-flores) → template → numerals.
+      // Pass langFlores=null to get the lang-agnostic preview (global lexicon only).
+      let body = (seg.english || '').trim();
       if (!body) return '';
+      // 1. Lexicon — applied to the body BEFORE template wrapping (so
+      //    template stays English; per-lang lexicon kicks in only when
+      //    we're computing for that language).
+      body = __m_pipeline_lexicon.applyLexicon(body, proj.lexicon, langFlores);
+      // 2. Template wrapping
       let raw = body;
       if (seg.use_template) {
         if (seg.type === 'question') {
@@ -2862,6 +3228,8 @@
           }
         }
       }
+      // 3. Numerals → English words (always at source side, per text_normalize.py).
+      raw = __m_pipeline_normalize.numeralsToWords(raw, 'en');
       return raw;
     }
 
@@ -3054,12 +3422,13 @@
       eff.dataset.role = 'effective';
       card.appendChild(eff);
 
-      // Lang grid
+      // Lang grid — includes English as a passthrough cell (shows effective
+      // text without going through the model, since en→en is a no-op per
+      // Python's translator).
       const grid = document.createElement('div');
       grid.className = 'lang-grid';
       grid.dataset.role = 'lang-grid';
       for (const lang of (proj.langs || [])) {
-        if (lang === 'en') continue; // English source — no need to translate to itself
         grid.appendChild(buildLangCell(proj, seg, lang));
       }
       card.appendChild(grid);
@@ -3089,9 +3458,239 @@
       text.className = 'lang-cell-text';
       text.dataset.role = 'text';
       cell.appendChild(text);
+
+      // Audio actions: Speak + Takes (audio playback only, Web Speech tier)
+      const actions = document.createElement('div');
+      actions.className = 'lang-cell-actions';
+      actions.dataset.role = 'actions';
+
+      const speakBtn = document.createElement('button');
+      speakBtn.className = 'lang-cell-btn';
+      speakBtn.dataset.role = 'speak';
+      speakBtn.innerHTML = '▶ Speak';
+      speakBtn.onclick = (e) => {
+        e.stopPropagation();
+        onSpeakClicked(cell, proj, seg, lang);
+      };
+      actions.appendChild(speakBtn);
+
+      const takesBtn = document.createElement('button');
+      takesBtn.className = 'lang-cell-btn';
+      takesBtn.dataset.role = 'takes';
+      takesBtn.innerHTML = '⟳';
+      takesBtn.title = 'Recording takes';
+      takesBtn.onclick = (e) => {
+        e.stopPropagation();
+        onTakesClicked(cell, proj, seg, lang, takesBtn);
+      };
+      actions.appendChild(takesBtn);
+
+      const meta2 = document.createElement('span');
+      meta2.className = 'lang-cell-meta';
+      meta2.dataset.role = 'meta';
+      actions.appendChild(meta2);
+
+      // Per-segment override toggle — option segments only (Python convention:
+      // questions and bodies inherit project-level voice/pace).
+      if (seg.type === 'option' && lang !== 'en') {
+        const ovrBtn = document.createElement('button');
+        ovrBtn.className = 'lang-cell-btn';
+        ovrBtn.dataset.role = 'override-toggle';
+        ovrBtn.textContent = '⚙';
+        ovrBtn.title = 'Override voice / pace for this option';
+        ovrBtn.onclick = (e) => {
+          e.stopPropagation();
+          const ovr = cell.querySelector('[data-role="override-row"]');
+          if (ovr) ovr.style.display = (ovr.style.display === 'none') ? '' : 'none';
+        };
+        actions.appendChild(ovrBtn);
+      }
+
+      cell.appendChild(actions);
+
+      if (seg.type === 'option' && lang !== 'en') {
+        cell.appendChild(buildOverrideRow(proj, seg, lang));
+      }
+
       // Initial paint from saved translation + current queue status
       updateLangCell(cell, proj, seg, lang);
       return cell;
+    }
+
+    function buildOverrideRow(proj, seg, lang) {
+      const row = document.createElement('div');
+      row.dataset.role = 'override-row';
+      row.style.cssText = 'display:none;margin-top:6px;padding-top:6px;border-top:1px dashed var(--border)';
+      const projVoice = proj.voices?.[lang] || '(device default)';
+      const projPace  = proj.paces?.[lang]  || proj.default_pace || 'moderate';
+      const paceList = ['very_slow','slow','moderate','fast','very_fast'];
+      row.innerHTML = `
+        <div style="font-size:10px;color:var(--muted);margin-bottom:4px">Per-option override (leave blank to inherit)</div>
+        <div style="display:flex;gap:4px">
+          <select data-role="ovr-voice" style="flex:1;padding:4px 6px;border:1px solid var(--border-2);border-radius:4px;font-size:11px;background:var(--panel);color:var(--ink)">
+            <option value="">(default · ${__m_core_html.esc(projVoice)})</option>
+          </select>
+          <select data-role="ovr-pace" style="width:100px;padding:4px 6px;border:1px solid var(--border-2);border-radius:4px;font-size:11px;background:var(--panel);color:var(--ink)">
+            <option value="">(default · ${__m_core_html.esc(projPace.replace('_',' '))})</option>
+            ${paceList.map(p => `<option value="${p}">${p.replace('_',' ')}</option>`).join('')}
+          </select>
+        </div>
+      `;
+      const voiceSel = row.querySelector('[data-role="ovr-voice"]');
+      const paceSel  = row.querySelector('[data-role="ovr-pace"]');
+      // Populate voices async — voices may not be loaded yet.
+      __m_audio_speech.ensureVoices().then(() => {
+        const list = __m_audio_speech.listForLang(lang);
+        for (const v of list) {
+          const opt = document.createElement('option');
+          opt.value = v.name;
+          opt.textContent = `${v.name} · ${v.lang}`;
+          voiceSel.appendChild(opt);
+        }
+        voiceSel.value = seg.voices?.[lang] || '';
+      });
+      paceSel.value = seg.paces?.[lang] || '';
+      voiceSel.onchange = async () => {
+        seg.voices = seg.voices || {};
+        if (voiceSel.value) seg.voices[lang] = voiceSel.value;
+        else delete seg.voices[lang];
+        try { await __m_storage_projects.save(proj); }
+        catch (e) { __m_ui_toast.show(e.message, 'err'); }
+      };
+      paceSel.onchange = async () => {
+        seg.paces = seg.paces || {};
+        if (paceSel.value) seg.paces[lang] = paceSel.value;
+        else delete seg.paces[lang];
+        try { await __m_storage_projects.save(proj); }
+        catch (e) { __m_ui_toast.show(e.message, 'err'); }
+      };
+      return row;
+    }
+
+    function resolveVoice(proj, seg, lang) {
+      // Per-segment override > project-level > Web Speech default for lang.
+      return (seg.voices?.[lang]) || (proj.voices?.[lang]) || null;
+    }
+    function resolvePace(proj, seg, lang) {
+      return (seg.paces?.[lang]) || (proj.paces?.[lang]) || (proj.default_pace || 'moderate');
+    }
+
+    function _cellTextForSpeak(proj, seg, lang) {
+      // English: speak the effective text. Other langs: speak the saved
+      // translation (already script-correct, lexicon-applied per Python pipeline).
+      if (lang === 'en') return effectiveText(proj, seg, 'eng_Latn');
+      return (seg.translations?.[lang]?.[__m_data_project.CANONICAL_ROTATION]) || '';
+    }
+
+    async function onSpeakClicked(cell, proj, seg, lang) {
+      await __m_audio_speech.ensureVoices();
+      const text = _cellTextForSpeak(proj, seg, lang);
+      if (!text) {
+        __m_ui_toast.show('Nothing to speak yet — type some text first.', 'warn');
+        return;
+      }
+      if (!__m_audio_speech.isSupported()) {
+        __m_ui_toast.show('Web Speech API unavailable in this browser.', 'err');
+        return;
+      }
+      const voiceName = resolveVoice(proj, seg, lang);
+      const pace = resolvePace(proj, seg, lang);
+      const key = `${seg.id}::${lang}`;
+      // Record a take metadata entry on speak (lightweight — not a real audio
+      // file in the Web Speech tier; full audio comes in Layer 4 with Parler-TTS).
+      _recordTake(proj, seg, lang, { voiceName, pace, sourceText: text });
+      __m_audio_speech.speak(text, {
+        voiceName, pace, langCode: lang, key,
+        onError: (e) => __m_ui_toast.show(`Speech failed: ${e.error || e.message || 'unknown'}`, 'err'),
+      });
+    }
+
+    function _recordTake(proj, seg, lang, { voiceName, pace, sourceText }) {
+      // takes shape: seg.takes[lang][rotation_id] = [{ id, created_at, voice, pace, source_text }]
+      // current_takes[lang][rotation_id] = id
+      seg.takes = seg.takes || {};
+      seg.takes[lang] = seg.takes[lang] || {};
+      const r = __m_data_project.CANONICAL_ROTATION;
+      const list = seg.takes[lang][r] = seg.takes[lang][r] || [];
+      const take = {
+        id: 'tk_' + __m_core_id.shortHex(8),
+        created_at: __m_core_id.nowISO(),
+        voice: voiceName || null,
+        pace,
+        source_text: sourceText,
+      };
+      list.unshift(take);
+      // Cap at 10 to keep project.json bounded.
+      if (list.length > 10) list.length = 10;
+      seg.current_takes = seg.current_takes || {};
+      seg.current_takes[lang] = seg.current_takes[lang] || {};
+      seg.current_takes[lang][r] = take.id;
+      // Persist (best-effort — don't block playback on save error).
+      __m_storage_projects.save(proj).catch((e) => {
+        console.warn('[take] save failed', e);
+      });
+      // Update cell meta inline.
+      const cell = main.querySelector(`.lang-cell[data-seg-id="${seg.id}"][data-lang="${lang}"]`);
+      if (cell) updateLangCellMeta(cell, proj, seg, lang);
+    }
+
+    function updateLangCellMeta(cell, proj, seg, lang) {
+      const meta = cell.querySelector('[data-role="meta"]');
+      if (!meta) return;
+      const list = seg.takes?.[lang]?.[__m_data_project.CANONICAL_ROTATION] || [];
+      const currentId = seg.current_takes?.[lang]?.[__m_data_project.CANONICAL_ROTATION];
+      if (!list.length) {
+        meta.textContent = '';
+      } else {
+        const idx = list.findIndex(t => t.id === currentId);
+        meta.textContent = `Take ${list.length - idx}/${list.length}`;
+      }
+    }
+
+    function onTakesClicked(cell, proj, seg, lang, anchor) {
+      // Close any other open popover.
+      document.querySelectorAll('.takes-popover').forEach(el => el.remove());
+      const list = seg.takes?.[lang]?.[__m_data_project.CANONICAL_ROTATION] || [];
+      const currentId = seg.current_takes?.[lang]?.[__m_data_project.CANONICAL_ROTATION];
+      if (!list.length) {
+        __m_ui_toast.show('No takes yet — click ▶ Speak to make one.', 'warn');
+        return;
+      }
+      const pop = document.createElement('div');
+      pop.className = 'takes-popover';
+      const rect = anchor.getBoundingClientRect();
+      pop.style.top  = (rect.bottom + window.scrollY + 4) + 'px';
+      pop.style.left = (rect.left + window.scrollX) + 'px';
+      list.forEach((t, i) => {
+        const row = document.createElement('div');
+        row.className = 'take-row' + (t.id === currentId ? ' current' : '');
+        const tm = new Date(t.created_at);
+        row.innerHTML = `
+          <span>Take ${list.length - i} · ${__m_core_html.esc(t.voice || 'default')} · ${__m_core_html.esc(t.pace)}</span>
+          <span class="take-time">${tm.toLocaleTimeString()}</span>
+        `;
+        row.onclick = (e) => {
+          e.stopPropagation();
+          seg.current_takes[lang][__m_data_project.CANONICAL_ROTATION] = t.id;
+          __m_storage_projects.save(proj).catch(() => {});
+          updateLangCellMeta(cell, proj, seg, lang);
+          pop.remove();
+          // Speak this take using its recorded params.
+          __m_audio_speech.speak(t.source_text, {
+            voiceName: t.voice, pace: t.pace, langCode: lang,
+            key: `${seg.id}::${lang}`,
+          });
+        };
+        pop.appendChild(row);
+      });
+      document.body.appendChild(pop);
+      const closer = (e) => {
+        if (!pop.contains(e.target)) {
+          pop.remove();
+          document.removeEventListener('click', closer);
+        }
+      };
+      setTimeout(() => document.addEventListener('click', closer), 0);
     }
 
     function setStatusPill(pillEl, status, error) {
@@ -3109,9 +3708,24 @@
     }
 
     function updateLangCell(cell, proj, seg, lang) {
-      const flores = __m_data_lang.LANGUAGES[lang]?.flores;
       const text = cell.querySelector('[data-role="text"]');
       const pill = cell.querySelector('[data-role="status"]');
+
+      // English passthrough: en→en is a no-op per Python translator. Just
+      // show the effective text.
+      if (lang === 'en') {
+        const eff = effectiveText(proj, seg, 'eng_Latn');
+        if (eff) {
+          text.textContent = eff;
+          text.classList.remove('empty');
+          setStatusPill(pill, 'ready');
+        } else {
+          text.textContent = '(empty)';
+          text.classList.add('empty');
+          setStatusPill(pill, 'empty');
+        }
+        return;
+      }
 
       const saved = (seg.translations?.[lang]?.[__m_data_project.CANONICAL_ROTATION]) || '';
       const qStatus = __m_pipeline_queue.getStatus(seg.id, lang);
@@ -3134,6 +3748,16 @@
           : 'empty';
       }
       setStatusPill(pill, status, qStatus.error);
+
+      // Take history meta (e.g., "Take 3/3")
+      updateLangCellMeta(cell, proj, seg, lang);
+
+      // Disable speak when there's no text yet
+      const speakBtn = cell.querySelector('[data-role="speak"]');
+      if (speakBtn) {
+        const speakable = !!_cellTextForSpeak(proj, seg, lang);
+        speakBtn.disabled = !speakable;
+      }
     }
 
     function updateEffectivePreview(card, proj, seg) {
@@ -3151,11 +3775,16 @@
     function onEnglishInput(proj, seg, ta, card) {
       seg.english = ta.value;
       updateEffectivePreview(card, proj, seg);
-      // Mark cells stale immediately so user sees feedback.
+      // Mark cells stale immediately so user sees feedback. English cell is
+      // a passthrough — refresh its text directly.
       const grid = card.querySelector('[data-role="lang-grid"]');
       if (grid) {
         grid.querySelectorAll('.lang-cell').forEach(c => {
           const lang = c.dataset.lang;
+          if (lang === 'en') {
+            updateLangCell(c, proj, seg, 'en');
+            return;
+          }
           const pill = c.querySelector('[data-role="status"]');
           if (pill && (seg.english || '').trim()) {
             setStatusPill(pill, 'pending');
@@ -3178,14 +3807,17 @@
     }
 
     function triggerTranslate(proj, seg) {
-      const eff = effectiveText(proj, seg);
-      if (!eff.trim()) {
+      const previewEff = effectiveText(proj, seg);
+      if (!previewEff.trim()) {
         // Clear any pending translations for this segment.
         __m_pipeline_queue.cancelForSegment(seg.id);
         return;
       }
       for (const lang of (proj.langs || [])) {
         if (lang === 'en') continue;
+        const flores = __m_data_lang.LANGUAGES[lang]?.flores;
+        // Per-lang effective text — lexicon merge for this flores.
+        const eff = effectiveText(proj, seg, flores);
         __m_pipeline_queue.enqueue({
           segId: seg.id, lang, srcText: eff, projectId: proj.id
         });
@@ -3210,6 +3842,18 @@
     }
 
     __m_core_events.on('translate:status', onTranslateStatus);
+
+    // Highlight the active "Speak" button while Web Speech utterance is running.
+    __m_audio_speech.onActiveChange(({ active, key }) => {
+      // Clear previous highlights
+      main.querySelectorAll('.lang-cell-btn.playing').forEach(b => b.classList.remove('playing'));
+      if (active && key) {
+        const [segId, lang] = key.split('::');
+        const cell = main.querySelector(`.lang-cell[data-seg-id="${segId}"][data-lang="${lang}"]`);
+        const btn = cell?.querySelector('[data-role="speak"]');
+        if (btn) btn.classList.add('playing');
+      }
+    });
 
     return { render, triggerTranslate, retranslateAll, effectiveText };
   })();
@@ -3252,6 +3896,28 @@
         </div>
       ` : '';
 
+      const paceOpts = ['very_slow','slow','moderate','fast','very_fast']
+        .map(p => `<option value="${p}">${__m_core_html.esc(p.replace('_',' '))}</option>`).join('');
+      const voicesBlock = `
+        <div class="setting-block">
+          <h4>Voices &amp; paces</h4>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Web Speech voices on this device. Indic Parler-TTS is on the Layer 4 roadmap.</div>
+          <label style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;display:block;margin-bottom:4px">Default pace</label>
+          <select id="ed-default-pace" style="width:100%;padding:6px 8px;border:1px solid var(--border-2);border-radius:4px;font-size:13px;background:var(--panel);color:var(--ink);margin-bottom:12px">${paceOpts}</select>
+          <div id="ed-voices"></div>
+          <div style="font-size:10px;color:var(--muted);margin-top:6px">Voices show "(default)" until you've spoken at least once. Reload if voices look incomplete.</div>
+        </div>
+      `;
+
+      const lexiconBlock = `
+        <div class="setting-block">
+          <h4>Lexicon</h4>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Whole-word substitutions applied before translation. Global applies to every language; per-language entries override.</div>
+          <button class="btn btn-secondary" id="ed-lex-edit" style="width:100%;font-size:13px">Edit lexicon…</button>
+          <div id="ed-lex-summary" style="font-size:11px;color:var(--muted);margin-top:6px"></div>
+        </div>
+      `;
+
       rail.innerHTML = `
         <div class="setting-block">
           <h4>Project</h4>
@@ -3266,9 +3932,11 @@
           <div style="font-size:11px;color:var(--muted);margin-top:8px">Tap to add or remove. Translations for removed languages stay on disk and reappear if you re-add the language.</div>
         </div>
         ${templateBlock}
+        ${voicesBlock}
+        ${lexiconBlock}
         <div class="setting-block">
           <h4>About this layer</h4>
-          <div class="setting-row" style="font-size:12px;color:var(--muted)">Layer 1 ships per-segment translation across selected languages. Voices, paces, audio takes, and the IVR DAG editor land in Layer 2+.</div>
+          <div class="setting-row" style="font-size:12px;color:var(--muted)">Layer 2 ships Web Speech audio + take history + lexicon UI. The IVR DAG editor and announcement-domain UI come in Layer 3; high-quality Indic Parler-TTS is the Layer 4 toggle.</div>
         </div>
       `;
 
@@ -3325,6 +3993,31 @@
         ed.appendChild(chip);
       }
 
+      // Default pace
+      const defaultPaceSel = $('#ed-default-pace', rail);
+      defaultPaceSel.value = proj.default_pace || 'moderate';
+      defaultPaceSel.disabled = !canEdit;
+      defaultPaceSel.onchange = async () => {
+        proj.default_pace = defaultPaceSel.value;
+        try { await __m_storage_projects.save(proj); }
+        catch (err) { __m_ui_toast.show(err.message, 'err'); }
+      };
+
+      // Per-language voice + pace
+      renderVoicesBlock(proj, canEdit);
+
+      // Lexicon summary + edit button
+      renderLexiconSummary(proj);
+      const lexBtn = $('#ed-lex-edit', rail);
+      if (lexBtn) {
+        lexBtn.disabled = !canEdit;
+        lexBtn.onclick = () => __m_ui_modal.showLexiconEditor(proj, async () => {
+          await __m_storage_projects.save(proj);
+          renderLexiconSummary(proj);
+          __m_ui_screen_editor_segments.retranslateAll(proj);
+        });
+      }
+
       // Templates editing (debounced 500ms). On change → save → retranslate all
       // affected segments (which use the template via use_template=true).
       let tplTimer = null;
@@ -3361,6 +4054,68 @@
         };
       });
     }
+    async function renderVoicesBlock(proj, canEdit) {
+      const host = $('#ed-voices', rail);
+      if (!host) return;
+      host.innerHTML = '<div style="font-size:11px;color:var(--muted)">Loading voices…</div>';
+      await __m_audio_speech.ensureVoices();
+      host.innerHTML = '';
+      const paceList = ['very_slow','slow','moderate','fast','very_fast'];
+      for (const lang of (proj.langs || [])) {
+        const meta = __m_data_lang.LANGUAGES[lang];
+        if (!meta) continue;
+        const voices = __m_audio_speech.listForLang(lang);
+        const wrap = document.createElement('div');
+        wrap.style.marginBottom = '10px';
+        wrap.innerHTML = `
+          <label style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;display:block;margin-bottom:4px">${__m_core_html.esc(meta.name)}</label>
+          <div style="display:flex;gap:6px">
+            <select data-vlang="${lang}" data-role="voice" style="flex:1;padding:5px 6px;border:1px solid var(--border-2);border-radius:4px;font-size:12px;background:var(--panel);color:var(--ink)">
+              <option value="">(device default)</option>
+              ${voices.map(v => `<option value="${__m_core_html.esc(v.name)}">${__m_core_html.esc(v.name)} · ${__m_core_html.esc(v.lang)}</option>`).join('')}
+            </select>
+            <select data-vlang="${lang}" data-role="pace" style="width:110px;padding:5px 6px;border:1px solid var(--border-2);border-radius:4px;font-size:12px;background:var(--panel);color:var(--ink)">
+              <option value="">(default)</option>
+              ${paceList.map(p => `<option value="${p}">${p.replace('_',' ')}</option>`).join('')}
+            </select>
+          </div>
+        `;
+        host.appendChild(wrap);
+        const voiceSel = wrap.querySelector('[data-role="voice"]');
+        const paceSel  = wrap.querySelector('[data-role="pace"]');
+        voiceSel.value = proj.voices?.[lang] || '';
+        paceSel.value  = proj.paces?.[lang]  || '';
+        voiceSel.disabled = !canEdit;
+        paceSel.disabled  = !canEdit;
+        voiceSel.onchange = async () => {
+          proj.voices = proj.voices || {};
+          if (voiceSel.value) proj.voices[lang] = voiceSel.value;
+          else delete proj.voices[lang];
+          try { await __m_storage_projects.save(proj); }
+          catch (e) { __m_ui_toast.show(e.message, 'err'); }
+        };
+        paceSel.onchange = async () => {
+          proj.paces = proj.paces || {};
+          if (paceSel.value) proj.paces[lang] = paceSel.value;
+          else delete proj.paces[lang];
+          try { await __m_storage_projects.save(proj); }
+          catch (e) { __m_ui_toast.show(e.message, 'err'); }
+        };
+      }
+    }
+
+    function renderLexiconSummary(proj) {
+      const out = $('#ed-lex-summary', rail);
+      if (!out) return;
+      const lex = proj.lexicon || {};
+      const globalCount = Object.keys(lex.global || {}).length;
+      const langScopes = Object.keys(lex).filter(k => k !== 'global' && Object.keys(lex[k] || {}).length > 0);
+      const parts = [];
+      if (globalCount) parts.push(`${globalCount} global`);
+      for (const k of langScopes) parts.push(`${Object.keys(lex[k]).length} ${k}`);
+      out.textContent = parts.length ? parts.join(' · ') : 'No entries yet.';
+    }
+
     return { render };
   })();
 
@@ -3404,6 +4159,10 @@
     setTimeout(() => __m_ui_modal.maybeShowIntro(), 200);
     __m_core_events.on('session:attached', () => __m_ui_router.render());
     __m_core_events.on('session:detached', () => __m_ui_router.render());
+    // Pre-warm Web Speech voice catalog (some browsers don't fire voiceschanged
+    // until the first speak, so kicking off the load now means the rail's
+    // dropdowns are populated before the user clicks).
+    __m_audio_speech.ensureVoices().catch(() => {});
     // Expose for debug only — opt-in console access.
     window.__ghoshana = {
       state: __m_core_state.state,
