@@ -3076,7 +3076,7 @@
     }
 
     // ─── Public speak ─────────────────────────────────────────────────────
-    async function speak(text, { langCode, paceRate = 1.0, key, onEnd, onError } = {}) {
+    async function speak(text, { langCode, paceRate = 1.0, key, description, onEnd, onError } = {}) {
       try {
         if (!_ready) await ensureLoaded();
       } catch (e) {
@@ -3085,9 +3085,12 @@
         return;
       }
 
-      // Voice description: a stable default for now. Future Layer 2.5 work
-      // will pull this from project settings.
-      const description = 'A clear, warm female voice speaks at a moderate pace in a quiet, high-quality recording.';
+      // Caller passes the per-(project, segment, lang) description so the
+      // voice name (e.g. "Divya" for hi) conditions the model correctly.
+      // Fall back to a generic prompt only if no description was supplied.
+      if (!description) {
+        description = 'A clear, warm female voice speaks at a moderate pace in a quiet, high-quality recording.';
+      }
 
       try {
         _emitActive(true, key);
@@ -4369,6 +4372,25 @@
     function resolvePace(proj, seg, lang) {
       return (seg.paces?.[lang]) || (proj.paces?.[lang]) || (proj.default_pace || 'moderate');
     }
+    function resolveVoice(proj, seg, lang) {
+      // Per-segment override > project-level > language's curated default
+      // (e.g., Mary for en, Divya for hi, Jaya for ta — these names are
+      // baked into Parler's training distribution).
+      return (seg.voices?.[lang])
+          || (proj.voices?.[lang])
+          || __m_data_lang.LANGUAGES[lang]?.voice
+          || 'a speaker';
+    }
+    function buildVoiceDescription(proj, seg, lang) {
+      // Mirror of /Users/chiragpatnaik/Code/prashnam-voice/prashnam_voice/config.py
+      // DEFAULT_VOICE_DESCRIPTION_TEMPLATE. Parler-TTS reads voice characteristics
+      // from this prompt — getting the voice name and pace right is what makes
+      // Hindi sound like Divya, Tamil like Jaya, etc.
+      const voice = resolveVoice(proj, seg, lang);
+      const pace  = resolvePace(proj, seg, lang);
+      const phrase = __m_data_lang.PACES[pace] || 'speaks at a moderate pace';
+      return `${voice} ${phrase} in a clear, warm voice. The recording is of very high quality, with no background noise.`;
+    }
 
     function _cellTextForSpeak(proj, seg, lang) {
       // English: speak the effective text. Other langs: speak the saved
@@ -4391,7 +4413,8 @@
       const key = `${seg.id}::${lang}`;
       if (tier === 'parler') {
         try {
-          await __m_tts_parler.speak(text, { langCode: lang, paceRate, key });
+          const description = buildVoiceDescription(proj, seg, lang);
+          await __m_tts_parler.speak(text, { langCode: lang, paceRate, key, description });
         } catch (e) {
           __m_ui_toast.show(e.message || 'Parler unavailable — falling back to MMS.', 'warn');
           // Recurse via MMS as the fallback.
