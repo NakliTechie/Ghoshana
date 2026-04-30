@@ -2599,14 +2599,530 @@
   // ═══════════════════════════════════════════════════════════════════════════
 
   const __m_tts_parler = (() => {
-    function isReady() { return false; }
-    function isSupported() { return false; }
+    // Bundle: naklitechie/indic-parler-tts-ONNX (fp16 variants).
+    // Codec vocoder: onnx-community/dac_44khz-ONNX (fp16 decoder only).
+    const HF_REPO    = 'naklitechie/indic-parler-tts-ONNX';
+    const HF_BASE    = `https://huggingface.co/${HF_REPO}/resolve/main`;
+    const DAC_REPO   = 'onnx-community/dac_44khz-ONNX';
+    const DAC_BASE   = `https://huggingface.co/${DAC_REPO}/resolve/main`;
 
-    function speak() {
-      throw new Error('Parler-TTS not yet ported. Falling back to MMS.');
+    // Files to fetch + their approximate sizes (for progress UI). Sizes
+    // verified via HF Hub API on 2026-04-30.
+    const MODEL_FILES = [
+      { name: 'text_encoder_fp16.onnx',                 mb: 2.4   },
+      { name: 'text_encoder_fp16.onnx.data',            mb: 651   },
+      { name: 'decoder_model_fp16.onnx',                mb: 3.3   },
+      { name: 'decoder_model_fp16.onnx.data',           mb: 992   },
+      { name: 'decoder_with_past_model_fp16.onnx',      mb: 2.2   },
+      { name: 'decoder_with_past_model_fp16.onnx.data', mb: 622   },
+    ];
+    const DAC_FILE = { name: 'onnx/decoder_model_fp16.onnx', mb: 104 };
+    const TOTAL_MB = MODEL_FILES.reduce((s, f) => s + f.mb, 0) + DAC_FILE.mb;
+
+    // Architecture (matches the published bundle's README I/O cheat sheet).
+    const NUM_CODEBOOKS = 9;
+    const DEC_LAYERS    = 24;
+    const KV_KINDS      = ['decoder.key', 'decoder.value', 'encoder.key', 'encoder.value'];
+    const DEC_VOCAB     = 1088;
+    const PAD_ID        = 1024;
+    const BOS_ID        = 1025;
+    const START_ID      = 1025;
+    const EOS_ID        = 1024;     // = pad — generate stops on hitting EOS in cb0
+    const MAX_LENGTH    = 256;      // ~2.5 s of audio @ 44.1 kHz
+
+    // Sampling defaults (Parler is trained for sampling — greedy collapses
+    // to silence). Match what the upstream README recommends.
+    const TEMPERATURE = 1.0;
+    const TOP_K       = 0;          // 0 = no top-k filtering
+    const TOP_P       = 1.0;        // 1.0 = no top-p filtering
+
+    // ─── State ────────────────────────────────────────────────────────────
+    let _TJS = null;
+    let _tokenizer = null;
+    let _sessText = null, _sessDecNoPast = null, _sessDecWithPast = null, _sessDac = null;
+    let _ready = false;
+    let _loading = null;
+    let _audioCtx = null;
+    let _activeSource = null;
+    let _onActiveChange = null;
+    let _onProgress = null;
+
+    function isSupported() {
+      return typeof window !== 'undefined'
+          && typeof window.AudioContext === 'function' || typeof window.webkitAudioContext === 'function';
+    }
+    function isReady()       { return _ready; }
+    function isLoading()     { return !!_loading; }
+    function isLangSupported(/*lang*/) {
+      // Indic Parler is multilingual — covers all 22 Indic langs we list,
+      // regardless of load state. (The cell speak path lazy-loads on demand.)
+      return true;
     }
 
-    return { isReady, isSupported, speak, NOT_READY: true };
+    function onActiveChange(fn) { _onActiveChange = fn; }
+    function onProgress(fn)     { _onProgress     = fn; }
+    function _emitActive(active, key) { if (_onActiveChange) _onActiveChange({ active, key }); }
+    function _emitProgress(p) {
+      if (_onProgress) _onProgress(p);
+      __m_core_events.emit('model:progress', p);
+    }
+
+    // ─── Lazy load ────────────────────────────────────────────────────────
+    async function ensureLoaded() {
+      if (_ready)   return;
+      if (_loading) return _loading;
+      _loading = _doLoad().then(() => { _loading = null; })
+                          .catch(e => { _loading = null; throw e; });
+      return _loading;
+    }
+
+    async function _doLoad() {
+      if (typeof ort === 'undefined') throw new Error('onnxruntime-web not loaded.');
+
+      ort.env.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency || 1);
+      ort.env.wasm.simd       = true;
+
+      // Prefer WebGPU if available (Parler is too heavy for WASM in practice
+      // beyond very short prompts). Fall back to wasm.
+      const eps = (typeof navigator !== 'undefined' && navigator.gpu)
+        ? ['webgpu', 'wasm']
+        : ['wasm'];
+
+      // 1. Tokenizer via transformers.js (already loaded for MMS).
+      _emitProgress({ phase: 'init', file: 'tokenizer', pct: 0 });
+      if (!_TJS) {
+        _TJS = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@4/+esm');
+        if (_TJS.env) {
+          _TJS.env.allowLocalModels  = false;
+          _TJS.env.allowRemoteModels = true;
+        }
+      }
+      _tokenizer = await _TJS.AutoTokenizer.from_pretrained(HF_REPO);
+
+      // 2. ONNX bundles via the existing IDB-cached fetcher.
+      let downloadedMb = 0;
+      const buffers = {};
+      for (const f of MODEL_FILES) {
+        _emitProgress({ phase: 'downloading', file: `parler · ${f.name}`,
+                        pct: downloadedMb / TOTAL_MB });
+        const buf = await __m_pipeline_cache.fetchWithProgress(
+          `${HF_BASE}/${f.name}`,
+          (frac) => _emitProgress({
+            phase: 'downloading',
+            file: `parler · ${f.name}`,
+            pct: (downloadedMb + frac * f.mb) / TOTAL_MB,
+          })
+        );
+        buffers[f.name] = buf;
+        downloadedMb += f.mb;
+      }
+      _emitProgress({ phase: 'downloading', file: `dac · decoder`,
+                      pct: downloadedMb / TOTAL_MB });
+      const dacBuf = await __m_pipeline_cache.fetchWithProgress(
+        `${DAC_BASE}/${DAC_FILE.name}`,
+        (frac) => _emitProgress({
+          phase: 'downloading',
+          file: `dac · decoder`,
+          pct: (downloadedMb + frac * DAC_FILE.mb) / TOTAL_MB,
+        })
+      );
+      downloadedMb += DAC_FILE.mb;
+
+      // 3. Build ORT sessions. fp16 graphs with keep_io_types=True still
+      //    accept fp32 I/O — ORT inserts internal Cast nodes.
+      _emitProgress({ phase: 'init', file: 'text encoder', pct: 0.96 });
+      _sessText = await ort.InferenceSession.create(buffers['text_encoder_fp16.onnx'], {
+        externalData: [{ data: buffers['text_encoder_fp16.onnx.data'],
+                         path:  'text_encoder_fp16.onnx.data' }],
+        executionProviders: eps,
+      });
+
+      _emitProgress({ phase: 'init', file: 'decoder', pct: 0.97 });
+      _sessDecNoPast = await ort.InferenceSession.create(buffers['decoder_model_fp16.onnx'], {
+        externalData: [{ data: buffers['decoder_model_fp16.onnx.data'],
+                         path:  'decoder_model_fp16.onnx.data' }],
+        executionProviders: eps,
+      });
+
+      _emitProgress({ phase: 'init', file: 'decoder-with-past', pct: 0.98 });
+      _sessDecWithPast = await ort.InferenceSession.create(buffers['decoder_with_past_model_fp16.onnx'], {
+        externalData: [{ data: buffers['decoder_with_past_model_fp16.onnx.data'],
+                         path:  'decoder_with_past_model_fp16.onnx.data' }],
+        executionProviders: eps,
+      });
+
+      _emitProgress({ phase: 'init', file: 'codec', pct: 0.99 });
+      _sessDac = await ort.InferenceSession.create(dacBuf, {
+        executionProviders: eps,
+      });
+
+      _ready = true;
+      _emitProgress({ phase: 'ready', file: null, pct: 1.0 });
+    }
+
+    // ─── Delay pattern mask (port of parler_tts.build_delay_pattern_mask) ──
+    function _buildDelayPatternMask(maxLength) {
+      // Returns a Int32Array of shape [NUM_CODEBOOKS, maxLength] where
+      // -1 means "predict here", BOS_ID for BOS prefix, PAD_ID for EOS suffix.
+      const K = NUM_CODEBOOKS;
+      const out = new Int32Array(K * maxLength).fill(-1);
+      // BOS region: positions [0, k] inclusive for codebook k.
+      // EOS region: positions [maxLength - K + 1 + k, maxLength) for codebook k.
+      for (let k = 0; k < K; k++) {
+        for (let j = 0; j <= k && j < maxLength; j++) {
+          out[k * maxLength + j] = BOS_ID;
+        }
+        const eosStart = maxLength - K + 1 + k;
+        for (let j = Math.max(eosStart, 0); j < maxLength; j++) {
+          out[k * maxLength + j] = PAD_ID;
+        }
+      }
+      return out;
+    }
+
+    function _applyDelayPatternAt(predicted /* [K] */, patternMask, position, maxLength) {
+      // For each codebook, if patternMask[k][position] == -1 keep predicted,
+      // else override with the mask value (BOS or PAD).
+      const K = NUM_CODEBOOKS;
+      const out = new Int32Array(K);
+      for (let k = 0; k < K; k++) {
+        const mv = patternMask[k * maxLength + position];
+        out[k] = (mv === -1) ? predicted[k] : mv;
+      }
+      return out;
+    }
+
+    // ─── Sampling helpers ─────────────────────────────────────────────────
+    function _sampleNextToken(logitsRow, temperature, topK, topP) {
+      // logitsRow is a Float32Array of length DEC_VOCAB. Returns int token id.
+      // Apply temperature → softmax → optional top-k / top-p truncation → sample.
+      const V = logitsRow.length;
+      // Find max for numerical stability, apply temperature simultaneously.
+      let max = -Infinity;
+      const scaled = new Float32Array(V);
+      const t = temperature || 1.0;
+      for (let i = 0; i < V; i++) {
+        scaled[i] = logitsRow[i] / t;
+        if (scaled[i] > max) max = scaled[i];
+      }
+      // Top-k: keep only the top K logits (set rest to -Inf).
+      if (topK && topK > 0 && topK < V) {
+        const sorted = Array.from(scaled).map((v, i) => [v, i])
+          .sort((a, b) => b[0] - a[0]);
+        const kth = sorted[topK - 1][0];
+        for (let i = 0; i < V; i++) if (scaled[i] < kth) scaled[i] = -Infinity;
+      }
+      // Compute softmax probabilities.
+      let sum = 0;
+      const probs = new Float32Array(V);
+      for (let i = 0; i < V; i++) {
+        const e = Math.exp(scaled[i] - max);
+        probs[i] = e;
+        sum += e;
+      }
+      for (let i = 0; i < V; i++) probs[i] /= sum;
+      // Top-p: keep smallest set of tokens whose cumulative prob ≥ topP.
+      if (topP && topP < 1.0) {
+        const indexed = Array.from(probs).map((p, i) => [p, i])
+          .sort((a, b) => b[0] - a[0]);
+        let cum = 0; let cutoff = -1;
+        for (let i = 0; i < indexed.length; i++) {
+          cum += indexed[i][0];
+          if (cum >= topP) { cutoff = i; break; }
+        }
+        if (cutoff >= 0) {
+          const keep = new Set(indexed.slice(0, cutoff + 1).map(([, i]) => i));
+          let s2 = 0;
+          for (let i = 0; i < V; i++) {
+            if (!keep.has(i)) probs[i] = 0;
+            s2 += probs[i];
+          }
+          if (s2 > 0) for (let i = 0; i < V; i++) probs[i] /= s2;
+        }
+      }
+      // Sample.
+      const r = Math.random();
+      let cum = 0;
+      for (let i = 0; i < V; i++) {
+        cum += probs[i];
+        if (r < cum) return i;
+      }
+      return V - 1;
+    }
+
+    function _argmax(logitsRow) {
+      let best = -Infinity, bestI = 0;
+      for (let i = 0; i < logitsRow.length; i++) {
+        if (logitsRow[i] > best) { best = logitsRow[i]; bestI = i; }
+      }
+      return bestI;
+    }
+
+    // Extract the logits for the LAST position across all 9 codebooks from
+    // the decoder output. logits shape: [B*K=9, T, vocab].
+    function _logitsAtLastPosition(logitsTensor) {
+      const data = logitsTensor.data;       // Float32Array
+      const [BK, T, V] = logitsTensor.dims; // [9, T, 1088]
+      const out = new Array(BK);            // 9 rows of vocab
+      const lastT = T - 1;
+      for (let k = 0; k < BK; k++) {
+        const row = new Float32Array(V);
+        const base = k * T * V + lastT * V;
+        for (let i = 0; i < V; i++) row[i] = data[base + i];
+        out[k] = row;
+      }
+      return out;
+    }
+
+    // ─── AR loop ──────────────────────────────────────────────────────────
+    async function _runAR({ description, prompt, maxNewTokens, sampling, signal }) {
+      // 1. Tokenize description + prompt
+      const descIds = await _tokenizer(description, { return_tensors: 'np' });
+      const promptIds = await _tokenizer(prompt, { return_tensors: 'np' });
+      const descArr   = Array.from(descIds.input_ids.data);
+      const promptArr = Array.from(promptIds.input_ids.data);
+      const S = descArr.length;
+      const P = promptArr.length;
+
+      const descTensor = new ort.Tensor('int64', BigInt64Array.from(descArr.map(BigInt)),  [1, S]);
+      const descMask   = new ort.Tensor('int64', new BigInt64Array(S).fill(1n),             [1, S]);
+      const promptTensor = new ort.Tensor('int64', BigInt64Array.from(promptArr.map(BigInt)), [1, P]);
+      const promptMask = new ort.Tensor('int64', new BigInt64Array(P).fill(1n),               [1, P]);
+
+      // 2. Run text encoder
+      const encOut = await _sessText.run({ input_ids: descTensor, attention_mask: descMask });
+      const encH   = encOut.last_hidden_state;          // [1, S, 1024] fp32
+
+      if (signal && signal.aborted) throw new Error('aborted');
+
+      // 3. Build delay pattern mask for the FULL max length (BOS prefix +
+      //    predict region + EOS suffix). maxLength = num_codebooks +
+      //    maxNewTokens + (num_codebooks - 1) so we have headroom.
+      const maxLen = NUM_CODEBOOKS + maxNewTokens + (NUM_CODEBOOKS - 1);
+      const patternMask = _buildDelayPatternMask(maxLen);
+
+      // 4. Initial codec input: [B=1, K=9, T=1] all START_ID.
+      let curCodec = new Int32Array(NUM_CODEBOOKS).fill(START_ID);
+      const generated = [Array.from(curCodec)];   // tracks every step
+
+      // 5. Step 0: decoder_no_past
+      const codecTensor = new ort.Tensor('int64',
+        BigInt64Array.from(curCodec, v => BigInt(v)),
+        [1, NUM_CODEBOOKS, 1]);
+      let stepOut = await _sessDecNoPast.run({
+        codec_input_ids:        codecTensor,
+        prompt_input_ids:       promptTensor,
+        prompt_attention_mask:  promptMask,
+        encoder_hidden_states:  encH,
+        encoder_attention_mask: descMask,
+      });
+      let logitsRows = _logitsAtLastPosition(stepOut.logits);
+      let nextCodec = new Int32Array(NUM_CODEBOOKS);
+      for (let k = 0; k < NUM_CODEBOOKS; k++) {
+        nextCodec[k] = sampling
+          ? _sampleNextToken(logitsRows[k], TEMPERATURE, TOP_K, TOP_P)
+          : _argmax(logitsRows[k]);
+      }
+      // Apply delay pattern mask at position 1 (next position to fill).
+      nextCodec = _applyDelayPatternAt(nextCodec, patternMask, 1, maxLen);
+      generated.push(Array.from(nextCodec));
+
+      // Capture KV cache from no-past output for future steps.
+      // present.{i}.{kv_kind} → ort.Tensor
+      let presents = {};
+      for (let i = 0; i < DEC_LAYERS; i++) {
+        for (const kv of KV_KINDS) {
+          presents[`past_key_values.${i}.${kv}`] = stepOut[`present.${i}.${kv}`];
+        }
+      }
+
+      // 6. Steps 1..N: decoder_with_past, applying mask each step.
+      for (let step = 1; step < maxNewTokens; step++) {
+        if (signal && signal.aborted) throw new Error('aborted');
+
+        const pastT  = P + step;     // prompt prefix + prior codec steps
+        const fullT  = pastT + 1;
+        const curTensor = new ort.Tensor('int64',
+          BigInt64Array.from(nextCodec, v => BigInt(v)),
+          [1, NUM_CODEBOOKS, 1]);
+        const fullMask = new ort.Tensor('int64',
+          new BigInt64Array(fullT).fill(1n),
+          [1, fullT]);
+        const cachePos = new ort.Tensor('int64',
+          BigInt64Array.from([BigInt(pastT)]),
+          [1]);
+        const feed = {
+          codec_input_ids:        curTensor,
+          attention_mask:         fullMask,
+          encoder_attention_mask: descMask,
+          cache_position:         cachePos,
+          ...presents,
+        };
+        stepOut = await _sessDecWithPast.run(feed);
+        logitsRows = _logitsAtLastPosition(stepOut.logits);
+        nextCodec = new Int32Array(NUM_CODEBOOKS);
+        for (let k = 0; k < NUM_CODEBOOKS; k++) {
+          nextCodec[k] = sampling
+            ? _sampleNextToken(logitsRows[k], TEMPERATURE, TOP_K, TOP_P)
+            : _argmax(logitsRows[k]);
+        }
+        const position = step + 1;
+        if (position >= maxLen) break;
+        nextCodec = _applyDelayPatternAt(nextCodec, patternMask, position, maxLen);
+        generated.push(Array.from(nextCodec));
+
+        // Update presents for next step.
+        presents = {};
+        for (let i = 0; i < DEC_LAYERS; i++) {
+          for (const kv of KV_KINDS) {
+            presents[`past_key_values.${i}.${kv}`] = stepOut[`present.${i}.${kv}`];
+          }
+        }
+
+        // Yield to UI every 8 steps (mirrors Anuvaad's pattern).
+        if (step % 8 === 0) await new Promise(r => setTimeout(r, 0));
+
+        // Stop when codebook 0 emits EOS (1024) — Parler's signal to terminate.
+        // Note: codebook 0 starts predicting at position 1, so this catches
+        // model-emitted EOS tokens during normal generation.
+        if (nextCodec[0] === EOS_ID) {
+          // Trim the EOS row off the back so we don't pass it to DAC.
+          generated.pop();
+          break;
+        }
+        // Stop when we've reached the EOS region of the delay pattern (the
+        // last NUM_CODEBOOKS-1 positions are reserved for cb1..cb8 to drain
+        // their PAD tail; nothing meaningful gets generated there).
+        if (position >= maxLen - NUM_CODEBOOKS) break;
+      }
+
+      // 7. Strip the BOS-prefix + EOS-suffix using the pattern mask. The
+      //    "real" codec tokens are at positions where patternMask[k][j] == -1.
+      //    For each codebook, the run of valid positions is contiguous:
+      //    [k+1, maxLen - NUM_CODEBOOKS + 1 + k). After staggering, the
+      //    extracted T_real is the same across codebooks.
+      // We have `generated` of length L = generated.length.
+      // For each codebook k, valid is generated[j][k] where j in [k+1, ...].
+      const L = generated.length;
+      const T_real = L - NUM_CODEBOOKS;   // number of overlapping predict positions
+      if (T_real <= 0) {
+        return new Int32Array(NUM_CODEBOOKS * 1).fill(0);  // nothing to decode
+      }
+      const codecOut = new Int32Array(NUM_CODEBOOKS * T_real);
+      // DAC's per-codebook embeddings are only 1024 entries (no special slots).
+      // Parler's codec vocab includes BOS=1025 / PAD=EOS=1024 which are NOT
+      // valid DAC input. Clamp / replace any non-codec tokens with 0 (silent
+      // codec entry). The valid codec range is [0, 1023].
+      const DAC_VOCAB = 1024;
+      for (let k = 0; k < NUM_CODEBOOKS; k++) {
+        for (let t = 0; t < T_real; t++) {
+          const j = k + 1 + t;       // staggered position for codebook k
+          let v = (j < L) ? generated[j][k] : 0;
+          if (v < 0 || v >= DAC_VOCAB) v = 0;
+          codecOut[k * T_real + t] = v;
+        }
+      }
+      return { tokens: codecOut, T: T_real };
+    }
+
+    // ─── DAC decode ───────────────────────────────────────────────────────
+    async function _decodeCodec(codecTokens, T) {
+      // DAC's onnx-community decoder takes audio_codes [B, n_codebooks, T]
+      // and returns audio_values [B, 1, samples].
+      const ids = BigInt64Array.from(codecTokens, v => BigInt(v));
+      const tensor = new ort.Tensor('int64', ids, [1, NUM_CODEBOOKS, T]);
+      const out = await _sessDac.run({ audio_codes: tensor });
+      // Output node name varies by export; pick the first float output.
+      const outName = Object.keys(out).find(n => out[n].type === 'float32') || Object.keys(out)[0];
+      return { audio: out[outName].data, dims: out[outName].dims };
+    }
+
+    function _audioContext() {
+      if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (_audioCtx.state === 'suspended') _audioCtx.resume();
+      return _audioCtx;
+    }
+
+    function stop() {
+      if (_activeSource) {
+        try { _activeSource.stop(); } catch {}
+        _activeSource = null;
+      }
+      _emitActive(false, null);
+    }
+
+    function _play(audioFloat32, sampleRate, paceRate, key, onEnd, onError) {
+      try {
+        stop();
+        const ctx = _audioContext();
+        const buf = ctx.createBuffer(1, audioFloat32.length, sampleRate);
+        buf.getChannelData(0).set(audioFloat32);
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.playbackRate.value = paceRate;
+        src.connect(ctx.destination);
+        src.onended = () => {
+          if (_activeSource === src) _activeSource = null;
+          _emitActive(false, key);
+          if (onEnd) onEnd();
+        };
+        _activeSource = src;
+        _emitActive(true, key);
+        src.start();
+      } catch (e) {
+        _emitActive(false, key);
+        if (onError) onError(e);
+      }
+    }
+
+    // ─── Public speak ─────────────────────────────────────────────────────
+    async function speak(text, { langCode, paceRate = 1.0, key, onEnd, onError } = {}) {
+      try {
+        if (!_ready) await ensureLoaded();
+      } catch (e) {
+        if (onError) onError(e);
+        else throw e;
+        return;
+      }
+
+      // Voice description: a stable default for now. Future Layer 2.5 work
+      // will pull this from project settings.
+      const description = 'A clear, warm female voice speaks at a moderate pace in a quiet, high-quality recording.';
+
+      try {
+        _emitActive(true, key);
+        const { tokens, T } = await _runAR({
+          description,
+          prompt: text,
+          maxNewTokens: Math.min(MAX_LENGTH - NUM_CODEBOOKS - (NUM_CODEBOOKS - 1), 200),
+          sampling: true,
+        });
+        if (T <= 0) {
+          if (onError) onError(new Error('Empty TTS output (codec sequence too short).'));
+          _emitActive(false, key);
+          return;
+        }
+        const { audio, dims } = await _decodeCodec(tokens, T);
+        // dims should be [1, 1, samples]; flatten.
+        const len = dims[dims.length - 1];
+        let pcm = audio;
+        if (audio.length !== len) {
+          // Slice the relevant channel.
+          pcm = audio.subarray(0, len);
+        }
+        const sampleRate = 44100;
+        _play(pcm, sampleRate, paceRate, key, onEnd, onError);
+      } catch (e) {
+        _emitActive(false, key);
+        if (onError) onError(e);
+        else throw e;
+      }
+    }
+
+    return {
+      ensureLoaded, isReady, isLoading, isSupported, isLangSupported,
+      speak, stop, onActiveChange, onProgress,
+    };
   })();
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -3862,10 +4378,11 @@
     }
 
     function _resolveTier(proj) {
-      // Honour the project's audio_tier preference, but fall back to MMS if
-      // Parler isn't ready yet (port still in progress per __m_tts_parler).
+      // Honour the project's audio_tier preference. Parler now lazy-loads
+      // on first speak; only fall back to MMS if Parler isn't supported at
+      // all (no Web Audio / no ORT).
       const requested = proj.audio_tier || 'mms';
-      if (requested === 'parler' && !__m_tts_parler.isReady()) return 'mms';
+      if (requested === 'parler' && !__m_tts_parler.isSupported()) return 'mms';
       return requested;
     }
 
@@ -4223,13 +4740,16 @@
       const paceOpts = ['very_slow','slow','moderate','fast','very_fast']
         .map(p => `<option value="${p}">${__m_core_html.esc(p.replace('_',' '))}</option>`).join('');
       const tierActive = proj.audio_tier || 'mms';
-      const parlerReady = __m_tts_parler.isReady();
+      // Parler is enabled whenever the implementation is supported — model
+      // weights download lazily on the first speak (~2.3 GB, cached after).
+      const parlerEnabled = __m_tts_parler.isSupported();
+      const parlerReady   = __m_tts_parler.isReady();
       const voicesBlock = `
         <div class="setting-block">
           <h4>Audio</h4>
           <div style="display:flex;gap:6px;margin-bottom:10px">
             <button class="btn ${tierActive === 'mms' ? '' : 'btn-secondary'}" data-tier="mms" style="flex:1;font-size:12px;padding:6px 10px">MMS-TTS</button>
-            <button class="btn ${tierActive === 'parler' ? '' : 'btn-secondary'}" data-tier="parler" style="flex:1;font-size:12px;padding:6px 10px" ${parlerReady ? '' : 'disabled title="Port in progress — falls back to MMS"'}>Indic Parler ${parlerReady ? '' : '(soon)'}</button>
+            <button class="btn ${tierActive === 'parler' ? '' : 'btn-secondary'}" data-tier="parler" style="flex:1;font-size:12px;padding:6px 10px" ${parlerEnabled ? '' : 'disabled title="Web Audio or ORT-Web unavailable in this browser"'}>Indic Parler${parlerReady ? '' : ' (~2.3 GB on first use)'}</button>
           </div>
           <div style="font-size:11px;color:var(--muted);margin-bottom:8px" id="ed-tier-blurb">${tierActive === 'mms'
             ? 'MMS-TTS · on-device VITS, ~50-150 MB per language, downloaded + cached on first speak.'
