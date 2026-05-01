@@ -11,7 +11,10 @@
   <link rel="manifest" href='data:application/json,{"name":"Ghoshana","short_name":"Ghoshana","start_url":".","display":"standalone","background_color":"%23fff9f0","theme_color":"%230f4c5c"}'>
 
   <!-- ONNX Runtime Web (WASM/WebGPU backends) — pinned to match Anuvaad. -->
-  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js"></script>
+  <!-- Use the WebGPU build of ORT-Web (includes WASM fallback). The plain
+       ort.min.js doesn't ship the WebGPU backend, which silently degrades all
+       inference to WASM (≈ 1s per Parler decoder step instead of ≈ 30ms). -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.webgpu.min.js"></script>
 
   <style>
     /* ── Palette · Teal / Amber / Parchment ────────────────────────────────── */
