@@ -2428,17 +2428,10 @@
       as:  'naklitechie/mms-tts-as-ONNX',
       ur:  'naklitechie/mms-tts-ur-ONNX',
       mai: 'naklitechie/mms-tts-mai-ONNX',
-      // facebook/mms-tts-* doesn't have repos for these 6 langs (verified
-      // 2026-05-01 against the 1141-repo HF directory). Parler-TTS covers
-      // them in the multilingual Indic bundle — the rail flags them as
-      // "Parler tier required".
-      ne:  null,    // Nepali
-      sa:  null,    // Sanskrit
-      sd:  null,    // Sindhi
-      kok: null,    // Konkani
-      mni: null,    // Manipuri
-      sat: null,    // Santali
-      // ks (Kashmiri), brx (Bodo), doi (Dogri) — also Parler-only.
+      // No facebook/mms-tts-* upstream for ne (Nepali), sa (Sanskrit),
+      // sd (Sindhi), kok (Konkani), mni (Manipuri), sat (Santali) —
+      // verified 2026-05-01 against the 1141-repo HF directory. They share
+      // the same "Parler tier required" treatment as ks/brx/doi.
     };
 
     let _TJS = null;
