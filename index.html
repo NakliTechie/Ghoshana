@@ -2414,26 +2414,25 @@
       en:  'Xenova/mms-tts-eng',
       hi:  'Xenova/mms-tts-hin',
       kn:  'onnx-community/mms-tts-kan-ONNX',
-      // Awaiting export — the underlying facebook/mms-tts-<lang> PyTorch
-      // repos exist and convert cleanly via optimum-cli. Tracked in
-      // README.md under \"MMS-TTS coverage\".
-      ta:  null,  // facebook/mms-tts-tam → naklitechie/mms-tts-tam-ONNX
-      te:  null,  // facebook/mms-tts-tel
-      bn:  null,  // facebook/mms-tts-ben
-      mr:  null,  // facebook/mms-tts-mar
-      gu:  null,  // facebook/mms-tts-guj
-      ml:  null,  // facebook/mms-tts-mal
-      pa:  null,  // facebook/mms-tts-pan
-      or:  null,  // facebook/mms-tts-ory
-      as:  null,  // facebook/mms-tts-asm
-      ur:  null,  // facebook/mms-tts-urd-script_arabic
-      ne:  null,  // facebook/mms-tts-npi
-      sa:  null,  // facebook/mms-tts-san
-      mai: null,  // facebook/mms-tts-mai
-      sd:  null,  // facebook/mms-tts-snd-script_devanagari
-      kok: null,  // facebook/mms-tts-kok
-      mni: null,  // facebook/mms-tts-mni
-      sat: null,  // facebook/mms-tts-sat
+      // 2026-05-01: own ONNX exports for the 17 Indic langs neither Xenova nor
+      // onnx-community covers. See onnx-conversion/scripts/seq2seq/03_mms_batch_export.py.
+      ta:  'naklitechie/mms-tts-ta-ONNX',
+      te:  'naklitechie/mms-tts-te-ONNX',
+      bn:  'naklitechie/mms-tts-bn-ONNX',
+      mr:  'naklitechie/mms-tts-mr-ONNX',
+      gu:  'naklitechie/mms-tts-gu-ONNX',
+      ml:  'naklitechie/mms-tts-ml-ONNX',
+      pa:  'naklitechie/mms-tts-pa-ONNX',
+      or:  'naklitechie/mms-tts-or-ONNX',
+      as:  'naklitechie/mms-tts-as-ONNX',
+      ur:  'naklitechie/mms-tts-ur-ONNX',
+      ne:  'naklitechie/mms-tts-ne-ONNX',
+      sa:  'naklitechie/mms-tts-sa-ONNX',
+      mai: 'naklitechie/mms-tts-mai-ONNX',
+      sd:  'naklitechie/mms-tts-sd-ONNX',
+      kok: 'naklitechie/mms-tts-kok-ONNX',
+      mni: 'naklitechie/mms-tts-mni-ONNX',
+      sat: 'naklitechie/mms-tts-sat-ONNX',
       // ks (Kashmiri), brx (Bodo), doi (Dogri) — no facebook/mms-tts-* repo
       // exists at all. Need Parler tier (or a non-MMS engine) for these.
     };
@@ -2606,18 +2605,50 @@
     const DAC_REPO   = 'onnx-community/dac_44khz-ONNX';
     const DAC_BASE   = `https://huggingface.co/${DAC_REPO}/resolve/main`;
 
-    // Files to fetch + their approximate sizes (for progress UI). Sizes
-    // verified via HF Hub API on 2026-04-30.
-    const MODEL_FILES = [
-      { name: 'text_encoder_fp16.onnx',                 mb: 2.4   },
-      { name: 'text_encoder_fp16.onnx.data',            mb: 651   },
-      { name: 'decoder_model_fp16.onnx',                mb: 3.3   },
-      { name: 'decoder_model_fp16.onnx.data',           mb: 992   },
-      { name: 'decoder_with_past_model_fp16.onnx',      mb: 2.2   },
-      { name: 'decoder_with_past_model_fp16.onnx.data', mb: 622   },
-    ];
-    const DAC_FILE = { name: 'onnx/decoder_model_fp16.onnx', mb: 104 };
-    const TOTAL_MB = MODEL_FILES.reduce((s, f) => s + f.mb, 0) + DAC_FILE.mb;
+    // Two precision tiers in the same repo:
+    //   q4f16 (default) — int4 weights + fp16 activations + fp32 I/O.
+    //                     ~810 MB total, 2-4× faster on WebGPU.
+    //   fp16            — fp16 internals + fp32 I/O. ~2.27 GB total.
+    // q4f16 is a drop-in for fp16 (same I/O contract); we use it by default.
+    const FILES_BY_DTYPE = {
+      q4f16: [
+        { name: 'text_encoder_q4f16.onnx',                 mb: 2.0  },
+        { name: 'text_encoder_q4f16.onnx.data',            mb: 216  },
+        { name: 'decoder_model_q4f16.onnx',                mb: 2.7  },
+        { name: 'decoder_model_q4f16.onnx.data',           mb: 409  },
+        { name: 'decoder_with_past_model_q4f16.onnx',      mb: 1.9  },
+        { name: 'decoder_with_past_model_q4f16.onnx.data', mb: 182  },
+      ],
+      fp16: [
+        { name: 'text_encoder_fp16.onnx',                  mb: 2.4  },
+        { name: 'text_encoder_fp16.onnx.data',             mb: 651  },
+        { name: 'decoder_model_fp16.onnx',                 mb: 3.3  },
+        { name: 'decoder_model_fp16.onnx.data',            mb: 992  },
+        { name: 'decoder_with_past_model_fp16.onnx',       mb: 2.2  },
+        { name: 'decoder_with_past_model_fp16.onnx.data',  mb: 622  },
+      ],
+    };
+    let _DTYPE = 'q4f16';   // default; can be overridden via setDtype()
+    let MODEL_FILES = FILES_BY_DTYPE[_DTYPE];
+    const DAC_FILE  = { name: 'onnx/decoder_model_fp16.onnx', mb: 104 };
+    let   TOTAL_MB  = MODEL_FILES.reduce((s, f) => s + f.mb, 0) + DAC_FILE.mb;
+    function setDtype(d) {
+      if (d !== 'q4f16' && d !== 'fp16') throw new Error('dtype: q4f16 or fp16');
+      if (_ready && _DTYPE !== d) {
+        // Force a re-init the next time ensureLoaded runs
+        _ready = false;
+        _sessText = _sessDecNoPast = _sessDecWithPast = _sessDac = null;
+      }
+      _DTYPE = d;
+      MODEL_FILES = FILES_BY_DTYPE[_DTYPE];
+      TOTAL_MB    = MODEL_FILES.reduce((s, f) => s + f.mb, 0) + DAC_FILE.mb;
+    }
+    function getDtype() { return _DTYPE; }
+    function _onnxName(suffix) {
+      // Maps logical name → actual file in the bundle for the active dtype.
+      // suffix is 'text_encoder' | 'decoder_model' | 'decoder_with_past_model'.
+      return `${suffix}_${_DTYPE}.onnx`;
+    }
 
     // Architecture (matches the published bundle's README I/O cheat sheet).
     const NUM_CODEBOOKS = 9;
@@ -2728,26 +2759,26 @@
       );
       downloadedMb += DAC_FILE.mb;
 
-      // 3. Build ORT sessions. fp16 graphs with keep_io_types=True still
-      //    accept fp32 I/O — ORT inserts internal Cast nodes.
+      // 3. Build ORT sessions. q4f16 / fp16 graphs both have fp32 I/O
+      //    (drop-in compatible). The active dtype is _DTYPE.
+      const f1 = `text_encoder_${_DTYPE}.onnx`;
+      const f2 = `decoder_model_${_DTYPE}.onnx`;
+      const f3 = `decoder_with_past_model_${_DTYPE}.onnx`;
       _emitProgress({ phase: 'init', file: 'text encoder', pct: 0.96 });
-      _sessText = await ort.InferenceSession.create(buffers['text_encoder_fp16.onnx'], {
-        externalData: [{ data: buffers['text_encoder_fp16.onnx.data'],
-                         path:  'text_encoder_fp16.onnx.data' }],
+      _sessText = await ort.InferenceSession.create(buffers[f1], {
+        externalData: [{ data: buffers[f1 + '.data'], path: f1 + '.data' }],
         executionProviders: eps,
       });
 
       _emitProgress({ phase: 'init', file: 'decoder', pct: 0.97 });
-      _sessDecNoPast = await ort.InferenceSession.create(buffers['decoder_model_fp16.onnx'], {
-        externalData: [{ data: buffers['decoder_model_fp16.onnx.data'],
-                         path:  'decoder_model_fp16.onnx.data' }],
+      _sessDecNoPast = await ort.InferenceSession.create(buffers[f2], {
+        externalData: [{ data: buffers[f2 + '.data'], path: f2 + '.data' }],
         executionProviders: eps,
       });
 
       _emitProgress({ phase: 'init', file: 'decoder-with-past', pct: 0.98 });
-      _sessDecWithPast = await ort.InferenceSession.create(buffers['decoder_with_past_model_fp16.onnx'], {
-        externalData: [{ data: buffers['decoder_with_past_model_fp16.onnx.data'],
-                         path:  'decoder_with_past_model_fp16.onnx.data' }],
+      _sessDecWithPast = await ort.InferenceSession.create(buffers[f3], {
+        externalData: [{ data: buffers[f3 + '.data'], path: f3 + '.data' }],
         executionProviders: eps,
       });
 
@@ -3125,6 +3156,7 @@
     return {
       ensureLoaded, isReady, isLoading, isSupported, isLangSupported,
       speak, stop, onActiveChange, onProgress,
+      setDtype, getDtype,
     };
   })();
 
