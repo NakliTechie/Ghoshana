@@ -2414,8 +2414,9 @@
       en:  'Xenova/mms-tts-eng',
       hi:  'Xenova/mms-tts-hin',
       kn:  'onnx-community/mms-tts-kan-ONNX',
-      // 2026-05-01: own ONNX exports for the 17 Indic langs neither Xenova nor
-      // onnx-community covers. See onnx-conversion/scripts/seq2seq/03_mms_batch_export.py.
+      // 2026-05-01: own ONNX exports of the 11 Indic langs that have a
+      // facebook/mms-tts-<lang> upstream but no community ONNX yet. See
+      // onnx-conversion/scripts/seq2seq/03_mms_batch_export.py.
       ta:  'naklitechie/mms-tts-ta-ONNX',
       te:  'naklitechie/mms-tts-te-ONNX',
       bn:  'naklitechie/mms-tts-bn-ONNX',
@@ -2426,15 +2427,18 @@
       or:  'naklitechie/mms-tts-or-ONNX',
       as:  'naklitechie/mms-tts-as-ONNX',
       ur:  'naklitechie/mms-tts-ur-ONNX',
-      ne:  'naklitechie/mms-tts-ne-ONNX',
-      sa:  'naklitechie/mms-tts-sa-ONNX',
       mai: 'naklitechie/mms-tts-mai-ONNX',
-      sd:  'naklitechie/mms-tts-sd-ONNX',
-      kok: 'naklitechie/mms-tts-kok-ONNX',
-      mni: 'naklitechie/mms-tts-mni-ONNX',
-      sat: 'naklitechie/mms-tts-sat-ONNX',
-      // ks (Kashmiri), brx (Bodo), doi (Dogri) — no facebook/mms-tts-* repo
-      // exists at all. Need Parler tier (or a non-MMS engine) for these.
+      // facebook/mms-tts-* doesn't have repos for these 6 langs (verified
+      // 2026-05-01 against the 1141-repo HF directory). Parler-TTS covers
+      // them in the multilingual Indic bundle — the rail flags them as
+      // "Parler tier required".
+      ne:  null,    // Nepali
+      sa:  null,    // Sanskrit
+      sd:  null,    // Sindhi
+      kok: null,    // Konkani
+      mni: null,    // Manipuri
+      sat: null,    // Santali
+      // ks (Kashmiri), brx (Bodo), doi (Dogri) — also Parler-only.
     };
 
     let _TJS = null;
